@@ -1183,6 +1183,43 @@
                                     <TextBlock Text="{Binding BluetoothControlActionText}" Margin="6,0,0,0"/>
                                 </StackPanel>
                             </Button>
+                            <Button Command="{Binding ToggleWiredControlCommand}"
+                                    IsEnabled="{Binding CanToggleWiredControl}"
+                                    Style="{StaticResource PreviewToolButton}"
+                                    ToolTip="{Binding WiredControlActionText}"
+                                    AutomationProperties.AutomationId="WiredControlButton">
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Style="{StaticResource ButtonSymbolIcon}" Symbol="PlugConnected20" FontSize="15"/>
+                                    <TextBlock Text="{Binding WiredControlActionText}" Margin="6,0,0,0"/>
+                                </StackPanel>
+                            </Button>
+                            <StackPanel Orientation="Horizontal"
+                                        Visibility="{Binding WiredPhoneButtonsVisible}">
+                                <Button Command="{Binding PressWiredPhoneHomeCommand}"
+                                        Style="{StaticResource PreviewToolButton}"
+                                        ToolTip="{DynamicResource WiredPhoneHome}"
+                                        AutomationProperties.AutomationId="WiredPhoneHomeButton">
+                                    <TextBlock Text="{DynamicResource WiredPhoneHome}"/>
+                                </Button>
+                                <Button Command="{Binding PressWiredPhoneLockCommand}"
+                                        Style="{StaticResource PreviewToolButton}"
+                                        ToolTip="{DynamicResource WiredPhoneLock}"
+                                        AutomationProperties.AutomationId="WiredPhoneLockButton">
+                                    <TextBlock Text="{DynamicResource WiredPhoneLock}"/>
+                                </Button>
+                                <Button Command="{Binding PressWiredPhoneVolumeUpCommand}"
+                                        Style="{StaticResource PreviewToolButton}"
+                                        ToolTip="{DynamicResource WiredPhoneVolumeUp}"
+                                        AutomationProperties.AutomationId="WiredPhoneVolumeUpButton">
+                                    <TextBlock Text="{DynamicResource WiredPhoneVolumeUp}"/>
+                                </Button>
+                                <Button Command="{Binding PressWiredPhoneVolumeDownCommand}"
+                                        Style="{StaticResource PreviewToolButton}"
+                                        ToolTip="{DynamicResource WiredPhoneVolumeDown}"
+                                        AutomationProperties.AutomationId="WiredPhoneVolumeDownButton">
+                                    <TextBlock Text="{DynamicResource WiredPhoneVolumeDown}"/>
+                                </Button>
+                            </StackPanel>
                             <Button x:Name="QuickMediaOutputButton"
                                     Click="OnMediaOutputToolbarClick"
                                     Style="{StaticResource PreviewToolButton}"

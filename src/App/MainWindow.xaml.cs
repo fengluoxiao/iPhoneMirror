@@ -171,6 +171,12 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly HashSet<byte> _controlKeyboardUsages = [];
     private readonly HashSet<int> _controlModifierKeys = [];
     private byte _controlKeyboardModifiers;
+    private bool _wdaTouching;
+    private bool _wdaMoved;
+    private int _wdaDownX;
+    private int _wdaDownY;
+    private int _wdaLastX;
+    private int _wdaLastY;
     private bool _windowsCursorHidden;
     private nint _activeControlWindow;
     private string? _activeControlUdid;
@@ -204,11 +210,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private const ushort RawMouseMiddleDown = 0x0010;
     private const ushort RawMouseMiddleUp = 0x0020;
     private const ushort RawMouseWheel = 0x0400;
+    private const int WdaTapThresholdPixels = 12;
+    private const int WdaDragSegmentMinPixels = 4;
 
     private bool IsBluetoothControlActive =>
         _viewModel.BluetoothControlIsInputEnabled &&
         (_activeControlWindow != 0 ||
          _viewModel.IsBluetoothControlTarget(_viewModel.SelectedDevice?.Udid));
+
+    private bool IsWiredControlActive =>
+        _activeControlWindow == 0 &&
+        _viewModel.WiredControlIsInputEnabled &&
+        _viewModel.IsWiredControlTarget(_viewModel.SelectedDevice?.Udid);
 
     private static readonly TimeSpan DeviceDragHoldDuration = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan WorkspaceTransitionDuration = TimeSpan.FromMilliseconds(280);
@@ -304,6 +317,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void HandleControlPointerInput(Controls.PreviewPointerEventArgs e)
     {
+        // Wired control consumes absolute preview positions as direct touch
+        // injection; it takes precedence over the relative BLE pointer path.
+        if (IsWiredControlActive)
+        {
+            HandleWdaPointerInput(e);
+            return;
+        }
         if (!IsBluetoothControlActive) return;
         if (_rawMouseInputEnabled && e.Kind == Controls.PreviewPointerKind.Move)
             return;
@@ -499,6 +519,185 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
     }
 
+    private void HandleWdaPointerInput(Controls.PreviewPointerEventArgs e)
+    {
+        var sourceWidth = e.SourceWidth != 0 ? e.SourceWidth : (uint)_viewModel.SourceVideoWidth;
+        var sourceHeight = e.SourceHeight != 0 ? e.SourceHeight : (uint)_viewModel.SourceVideoHeight;
+        if (sourceWidth == 0 || sourceHeight == 0) return;
+        var service = _viewModel.WiredControl;
+        var (sourceX, sourceY) = MapPointerToSource(e, sourceWidth, sourceHeight);
+        switch (e.Kind)
+        {
+            case Controls.PreviewPointerKind.Move:
+                if (_wdaTouching)
+                    SendWdaDragSegment(service, sourceX, sourceY,
+                        (int)sourceWidth, (int)sourceHeight);
+                break;
+            case Controls.PreviewPointerKind.ButtonDown:
+                if ((e.Button & 0x1) != 0)
+                {
+                    _wdaTouching = true;
+                    _wdaMoved = false;
+                    _wdaDownX = sourceX;
+                    _wdaDownY = sourceY;
+                    _wdaLastX = sourceX;
+                    _wdaLastY = sourceY;
+                }
+                else if ((e.Button & 0x2) != 0 &&
+                    service.TryConvertSourceToPoints(sourceX, sourceY,
+                        (int)sourceWidth, (int)sourceHeight, out var pressX, out var pressY))
+                {
+                    service.EnqueueLongPress(pressX, pressY);
+                }
+                break;
+            case Controls.PreviewPointerKind.ButtonUp:
+                if ((e.Button & 0x1) != 0 && _wdaTouching)
+                {
+                    _wdaTouching = false;
+                    FinishWdaTouch(service, sourceX, sourceY,
+                        (int)sourceWidth, (int)sourceHeight);
+                }
+                break;
+            case Controls.PreviewPointerKind.Wheel:
+                SendWdaWheel(service, e.Wheel, sourceX, sourceY,
+                    (int)sourceWidth, (int)sourceHeight);
+                break;
+            case Controls.PreviewPointerKind.Reset:
+                _wdaTouching = false;
+                break;
+        }
+    }
+
+    private void SendWdaDragSegment(WdaControlService service,
+        int sourceX, int sourceY, int sourceWidth, int sourceHeight)
+    {
+        var movedTotal = Math.Abs(sourceX - _wdaDownX) +
+            Math.Abs(sourceY - _wdaDownY);
+        if (movedTotal > WdaTapThresholdPixels) _wdaMoved = true;
+        // Until the tap-vs-drag threshold is crossed, keep accumulating so a
+        // small hand tremor still lands as a clean tap on release.
+        if (!_wdaMoved) return;
+        var segmentX = sourceX - _wdaLastX;
+        var segmentY = sourceY - _wdaLastY;
+        if (Math.Abs(segmentX) < WdaDragSegmentMinPixels &&
+            Math.Abs(segmentY) < WdaDragSegmentMinPixels) return;
+        if (!service.TryConvertSourceToPoints(_wdaLastX, _wdaLastY,
+                sourceWidth, sourceHeight, out var fromX, out var fromY) ||
+            !service.TryConvertSourceToPoints(sourceX, sourceY,
+                sourceWidth, sourceHeight, out var toX, out var toY)) return;
+        service.EnqueueDrag(fromX, fromY, toX, toY);
+        _wdaLastX = sourceX;
+        _wdaLastY = sourceY;
+    }
+
+    private void FinishWdaTouch(WdaControlService service,
+        int sourceX, int sourceY, int sourceWidth, int sourceHeight)
+    {
+        if (!_wdaMoved)
+        {
+            if (service.TryConvertSourceToPoints(_wdaDownX, _wdaDownY,
+                    sourceWidth, sourceHeight, out var tapX, out var tapY))
+                service.EnqueueTap(tapX, tapY);
+            return;
+        }
+        if (Math.Abs(sourceX - _wdaLastX) < WdaDragSegmentMinPixels &&
+            Math.Abs(sourceY - _wdaLastY) < WdaDragSegmentMinPixels) return;
+        if (!service.TryConvertSourceToPoints(_wdaLastX, _wdaLastY,
+                sourceWidth, sourceHeight, out var dragFromX, out var dragFromY) ||
+            !service.TryConvertSourceToPoints(sourceX, sourceY,
+                sourceWidth, sourceHeight, out var dragToX, out var dragToY)) return;
+        service.EnqueueDrag(dragFromX, dragFromY, dragToX, dragToY);
+    }
+
+    private void SendWdaWheel(WdaControlService service, int wheel,
+        int sourceX, int sourceY, int sourceWidth, int sourceHeight)
+    {
+        if (wheel == 0) return;
+        if (!service.TryConvertSourceToPoints(sourceX, sourceY,
+                sourceWidth, sourceHeight, out var pointX, out var pointY)) return;
+        var logical = service.LogicalSize;
+        if (logical is null) return;
+        var pointsPerTick = Math.Clamp(logical.Value.Height * 0.12, 48, 160);
+        var half = (float)(pointsPerTick / 2);
+        // A wheel-up gesture moves the finger down the glass, mirroring how
+        // touch content scrolls; wheel-down inverts the flick.
+        var fromY = pointY - half;
+        var toY = pointY + half;
+        if (wheel < 0) (fromY, toY) = (toY, fromY);
+        var maxY = (float)(logical.Value.Height - 1);
+        fromY = Math.Clamp(fromY, 0f, maxY);
+        toY = Math.Clamp(toY, 0f, maxY);
+        service.EnqueueFlick(pointX, fromY, pointX, toY);
+    }
+
+    private void HandleWdaKeyboardInput(Controls.PreviewKeyboardEventArgs e)
+    {
+        if (e.Kind != Controls.PreviewKeyboardKind.Down) return;
+        var modifiers = System.Windows.Input.Keyboard.Modifiers;
+        if (modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control) ||
+            modifiers.HasFlag(System.Windows.Input.ModifierKeys.Alt) ||
+            modifiers.HasFlag(System.Windows.Input.ModifierKeys.Windows))
+            return;
+        if (!TryMapVirtualKeyToText(e.VirtualKey,
+                modifiers.HasFlag(System.Windows.Input.ModifierKeys.Shift),
+                out var text)) return;
+        _ = _viewModel.WiredControl.SendTextAsync(text);
+    }
+
+    private static bool TryMapVirtualKeyToText(
+        int virtualKey, bool shift, out string text)
+    {
+        text = string.Empty;
+        if (virtualKey is >= 0x41 and <= 0x5A)
+        {
+            text = shift
+                ? ((char)(virtualKey - 0x41 + 'A')).ToString()
+                : ((char)(virtualKey - 0x41 + 'a')).ToString();
+            return true;
+        }
+        if (virtualKey is >= 0x31 and <= 0x39)
+        {
+            text = shift ? ")!@#$%^&*("[virtualKey - 0x31].ToString()
+                : ((char)virtualKey).ToString();
+            return true;
+        }
+        if (virtualKey == 0x30)
+        {
+            text = shift ? ")" : "0";
+            return true;
+        }
+        if (virtualKey is >= 0x60 and <= 0x69)
+        {
+            text = ((char)(virtualKey - 0x60 + '0')).ToString();
+            return true;
+        }
+        text = virtualKey switch
+        {
+            0x20 => " ",
+            0x0D => "\n",
+            0x08 => "\b",
+            0x09 => "\t",
+            0xBA => shift ? ":" : ";",
+            0xBB => shift ? "+" : "=",
+            0xBC => shift ? "<" : ",",
+            0xBD => shift ? "_" : "-",
+            0xBE => shift ? ">" : ".",
+            0xBF => shift ? "?" : "/",
+            0xC0 => shift ? "~" : "`",
+            0xDB => shift ? "{" : "[",
+            0xDC => shift ? "|" : "\\",
+            0xDD => shift ? "}" : "]",
+            0xDE => shift ? "\"" : "'",
+            0x6A => "*",
+            0x6B => "+",
+            0x6D => "-",
+            0x6E => ".",
+            0x6F => "/",
+            _ => string.Empty,
+        };
+        return text.Length > 0;
+    }
+
     private void OnIndependentPointerInput(string udid,
         Controls.PreviewPointerEventArgs e)
     {
@@ -630,6 +829,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private async void HandleControlKeyboardInput(
         Controls.PreviewKeyboardEventArgs e)
     {
+        if (IsWiredControlActive)
+        {
+            HandleWdaKeyboardInput(e);
+            return;
+        }
         if (!IsBluetoothControlActive)
             return;
         if (e.Kind == Controls.PreviewKeyboardKind.Reset)

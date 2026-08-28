@@ -5,6 +5,14 @@ All notable changes to iPhoneMirror are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add an experimental wired control backend that injects mouse and keyboard
+  input through a WebDriverAgent app on the device over the same usbmux link
+  as wired mirroring, including tap, drag, long-press and scroll gestures,
+  English text input, and Home/Lock/volume hardware buttons with a guided
+  setup window. Design notes live in `docs/WDA_WIRED_CONTROL.md`.
+
 ## [1.8.0] - 2026-08-26
 
 ### Added

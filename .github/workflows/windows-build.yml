@@ -39,3 +39,11 @@ jobs:
       - name: Build Release, run tests, and publish Windows x64 output
         shell: pwsh
         run: ./build.ps1 -Configuration Release
+
+      - name: Upload portable build for manual verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPhoneMirror-win-x64-dev
+          path: outputs/iPhoneMirror/
+          retention-days: 7
+          if-no-files-found: error

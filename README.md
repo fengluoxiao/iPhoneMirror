@@ -76,6 +76,8 @@ iPhoneMirror 不给所有设备套用同一个通用圆角。程序会根据 App
 - 媒体不经过 iPhoneMirror 云端中转，USB 场景不依赖网络；
 - 干净的独立窗口可直接用于 OBS，截图直接读取解码帧，不包含软件 UI。
 - 可选 BLE HID 鼠标/键盘控制：配合 iOS 辅助触控，无需在手机安装 App 或越狱；
+- 有线控制（实验）：通过手机上的 WebDriverAgent 注入鼠标与键盘输入，与有线投屏
+  共用同一条数据线，点击与拖动延迟低于蓝牙；
 
 ## 界面预览
 
@@ -383,6 +385,8 @@ iPhone/iPad
 - QuickTime Screen Capture 并非 Apple 公开、稳定的第三方 API。
 - AirPlay 兼容实现并非 Apple 官方接口，未来 iOS 更新可能需要适配。
 - 蓝牙反向控制依赖适配器的 BLE 外设模式和 iOS 辅助触控，只提供指针级单指操作。
+- 有线控制依赖手机端一次性安装并签名 WebDriverAgent（免费 Apple ID 签名 7 天过期），
+  键盘仅支持英文布局，拖动为分段注入。
 
 ## 参与项目
 

@@ -116,6 +116,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private readonly VirtualCameraService _virtualCamera;
     private readonly BluetoothHidMouseService _bluetoothControl = new();
     private readonly BluetoothControlNoticePolicy _bluetoothNoticePolicy = new();
+    private readonly WdaControlService _wiredControl = new();
     private readonly Dictionary<string, ImageSettingsWindow> _imageSettingsWindows =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _settingsGate = new(1, 1);
@@ -176,6 +177,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private string _mediaCastStatus = string.Empty;
     private string _bluetoothControlStatus = string.Empty;
     private bool _bluetoothControlEnabled;
+    private WdaControlState _wiredControlState = WdaControlState.Off;
+    private bool _wiredControlStarting;
+    private string? _wiredControlDeviceUdid;
     private bool _bluetoothControlConnected;
     private bool _bluetoothControlCalibrated;
     private bool _bluetoothCalibrationInProgress;
@@ -273,6 +277,13 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     public RelayCommand StartBluetoothControlCommand { get; }
     public RelayCommand StopBluetoothControlCommand { get; }
     public RelayCommand ToggleBluetoothControlCommand { get; }
+    public RelayCommand StartWiredControlCommand { get; }
+    public RelayCommand StopWiredControlCommand { get; }
+    public RelayCommand ToggleWiredControlCommand { get; }
+    public RelayCommand PressWiredPhoneHomeCommand { get; }
+    public RelayCommand PressWiredPhoneLockCommand { get; }
+    public RelayCommand PressWiredPhoneVolumeUpCommand { get; }
+    public RelayCommand PressWiredPhoneVolumeDownCommand { get; }
     public string BluetoothControlStatus => _bluetoothControlStatus;
     public bool IsBluetoothControlEnabled => _bluetoothControlEnabled;
     public bool BluetoothControlIsInputEnabled => _bluetoothControlEnabled &&
@@ -297,6 +308,36 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         !string.IsNullOrWhiteSpace(_bluetoothControlDeviceUdid) &&
         _sessions.TryGet(_bluetoothControlDeviceUdid, out var session) &&
         IsSessionPresentable(session);
+
+    public bool IsWiredControlEnabled => _wiredControlDeviceUdid is not null &&
+        _wiredControlState is WdaControlState.Waiting or WdaControlState.Connected;
+    public bool WiredControlIsConnected => _wiredControlState == WdaControlState.Connected;
+    public bool WiredControlIsInputEnabled => WiredControlIsConnected;
+    public bool WiredPhoneButtonsVisible => WiredControlIsConnected;
+    public bool CanStartWiredControl => CanEnableWiredControlFor(SelectedDevice?.Udid);
+    public bool CanStopWiredControl => IsWiredControlEnabled;
+    public bool CanToggleWiredControl => !_wiredControlStarting &&
+        (IsWiredControlEnabled || CanStartWiredControl);
+    public string WiredControlActionText => LocalizationService.Get(
+        IsWiredControlEnabled ? "StopWiredControl" : "StartWiredControl");
+
+    internal WdaControlService WiredControl => _wiredControl;
+
+    internal bool IsWiredControlTarget(string? udid) => IsWiredControlEnabled &&
+        DeviceViewModel.UdidEquals(_wiredControlDeviceUdid, udid);
+
+    private bool CanEnableWiredControlFor(string? deviceUdid) =>
+        !_wiredControlStarting && !IsWiredControlEnabled && !IsBusy &&
+        !string.IsNullOrWhiteSpace(deviceUdid) &&
+        !DeviceViewModel.IsWirelessUdid(deviceUdid) &&
+        !DeviceViewModel.IsMediaCastUdid(deviceUdid) &&
+        _sessions.TryGet(deviceUdid, out var wiredSession) &&
+        IsSessionPresentable(wiredSession);
+
+    private bool HasWiredControlTargetSession =>
+        !string.IsNullOrWhiteSpace(_wiredControlDeviceUdid) &&
+        _sessions.TryGet(_wiredControlDeviceUdid, out var wiredSession) &&
+        IsSessionPresentable(wiredSession);
     public double BluetoothMouseSensitivity
     {
         get => _bluetoothMouseSensitivity;
@@ -973,6 +1014,21 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             () => CanStopBluetoothControl);
         ToggleBluetoothControlCommand = new RelayCommand(
             () => _ = ToggleBluetoothControlAsync(), () => CanToggleBluetoothControl);
+        StartWiredControlCommand = new RelayCommand(
+            () => _ = EnableWiredControlAsync(), () => CanStartWiredControl);
+        StopWiredControlCommand = new RelayCommand(
+            () => _ = StopWiredControlAsync(), () => CanStopWiredControl);
+        ToggleWiredControlCommand = new RelayCommand(
+            () => _ = ToggleWiredControlAsync(), () => CanToggleWiredControl);
+        PressWiredPhoneHomeCommand = new RelayCommand(
+            () => _ = _wiredControl.PressButtonAsync("home"));
+        PressWiredPhoneLockCommand = new RelayCommand(
+            () => _ = _wiredControl.PressButtonAsync("lock"));
+        PressWiredPhoneVolumeUpCommand = new RelayCommand(
+            () => _ = _wiredControl.PressButtonAsync("volumeUp"));
+        PressWiredPhoneVolumeDownCommand = new RelayCommand(
+            () => _ = _wiredControl.PressButtonAsync("volumeDown"));
+        _wiredControl.StateChanged += OnWiredControlStateChanged;
         BluetoothControlNoticeWindow.ActiveNoticeClosed += OnBluetoothControlNoticeClosed;
         _bluetoothControl.StatusChanged += (_, _) =>
         {
@@ -1045,6 +1101,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     {
         var controlDeviceUdid = targetDeviceUdid ?? SelectedDevice?.Udid;
         if (!CanEnableBluetoothControlFor(controlDeviceUdid)) return;
+        // The two reverse-control backends drive the same preview input, so
+        // enabling one always releases the other first.
+        if (IsWiredControlEnabled) await DisableWiredControlAsync();
         _bluetoothControlDeviceUdid = controlDeviceUdid;
         _bluetoothControlNoticePending = _bluetoothNoticePolicy.ShouldShowForDevice(
             controlDeviceUdid);
@@ -1244,6 +1303,120 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             : EnableBluetoothControlAsync();
 
     private Task StopBluetoothControlAsync() => DisableBluetoothControlAsync();
+
+    internal async Task EnableWiredControlAsync(string? targetDeviceUdid = null)
+    {
+        var controlDeviceUdid = targetDeviceUdid ?? SelectedDevice?.Udid;
+        if (!CanEnableWiredControlFor(controlDeviceUdid)) return;
+        if (IsBluetoothControlEnabled) await DisableBluetoothControlAsync();
+        _wiredControlStarting = true;
+        NotifyWiredControlStateChanged();
+        try
+        {
+            _wiredControlDeviceUdid = controlDeviceUdid;
+            AddDiagnosticLog(AppLog.Event("wired_control_start_begin",
+                ("device", AppLog.Device(controlDeviceUdid))));
+            // StartAsync raises Waiting immediately (which opens the guidance
+            // window) and Failed with a specific reason when usbmux or WDA
+            // cannot be reached.
+            await _wiredControl.StartAsync(controlDeviceUdid!,
+                _shutdownCancellation.Token);
+            if (_wiredControlState == WdaControlState.Failed)
+                _wiredControlDeviceUdid = null;
+        }
+        finally
+        {
+            _wiredControlStarting = false;
+            NotifyWiredControlStateChanged();
+        }
+    }
+
+    internal async Task DisableWiredControlAsync()
+    {
+        if (_wiredControlState == WdaControlState.Off && !_wiredControlStarting) return;
+        AddDiagnosticLog(AppLog.Event("wired_control_stop_begin",
+            ("device", AppLog.Device(_wiredControlDeviceUdid)),
+            ("state", _wiredControlState.ToString())));
+        _wiredControlDeviceUdid = null;
+        await _wiredControl.StopAsync();
+        WdaControlNoticeWindow.TryCloseActive();
+        NotifyWiredControlStateChanged();
+        AddDiagnosticLog(AppLog.Event("wired_control_stop_complete"));
+    }
+
+    internal Task ToggleWiredControlAsync() =>
+        IsWiredControlEnabled
+            ? DisableWiredControlAsync()
+            : EnableWiredControlAsync();
+
+    private Task StopWiredControlAsync() => DisableWiredControlAsync();
+
+    private void OnWiredControlStateChanged(WdaControlState state, string? error)
+    {
+        void Update()
+        {
+            if (_disposed) return;
+            _wiredControlState = state;
+            switch (state)
+            {
+                case WdaControlState.Connected:
+                    AddUiLog(LocalizationService.Get("WiredControlConnected"));
+                    AddDiagnosticLog(AppLog.Event("wired_control_connected",
+                        ("device", AppLog.Device(_wiredControlDeviceUdid))));
+                    if (Application.Current?.MainWindow is { } connectedOwner)
+                        WdaControlNoticeWindow.ShowConnected(connectedOwner);
+                    break;
+                case WdaControlState.Waiting:
+                    AddUiLog(LocalizationService.Get("WiredControlWaiting"));
+                    if (Application.Current?.MainWindow is { } waitingOwner)
+                        WdaControlNoticeWindow.ShowWaiting(waitingOwner);
+                    break;
+                case WdaControlState.Failed:
+                    AddUiLog(DescribeWiredControlError(error));
+                    AddDiagnosticLog(AppLog.Event("wired_control_start_failed",
+                        ("device", AppLog.Device(_wiredControlDeviceUdid)),
+                        ("error", error)));
+                    if (Application.Current?.MainWindow is { } failedOwner)
+                        WdaControlNoticeWindow.ShowFailure(failedOwner,
+                            DescribeWiredControlError(error));
+                    break;
+                case WdaControlState.Off:
+                    WdaControlNoticeWindow.TryCloseActive();
+                    break;
+            }
+            NotifyWiredControlStateChanged();
+        }
+
+        if (Application.Current?.Dispatcher.CheckAccess() == true) Update();
+        else Application.Current?.Dispatcher.BeginInvoke(Update);
+    }
+
+    private static string DescribeWiredControlError(string? error) =>
+        error switch
+        {
+            null or "" => LocalizationService.Get("WdaControlErrorGeneric"),
+            "device_not_found" => LocalizationService.Get("WdaControlErrorDeviceNotFound"),
+            "port_unreachable" => LocalizationService.Get("WdaControlErrorPortUnreachable"),
+            "connect_rejected" => LocalizationService.Get("WdaControlErrorConnectRejected"),
+            "session_unavailable" => LocalizationService.Get("WdaControlErrorSessionUnavailable"),
+            _ => string.Format(
+                LocalizationService.Get("WdaControlErrorGenericFormat"), error),
+        };
+
+    private void NotifyWiredControlStateChanged()
+    {
+        OnPropertyChanged(nameof(IsWiredControlEnabled));
+        OnPropertyChanged(nameof(WiredControlIsConnected));
+        OnPropertyChanged(nameof(WiredControlIsInputEnabled));
+        OnPropertyChanged(nameof(WiredPhoneButtonsVisible));
+        OnPropertyChanged(nameof(CanStartWiredControl));
+        OnPropertyChanged(nameof(CanStopWiredControl));
+        OnPropertyChanged(nameof(CanToggleWiredControl));
+        OnPropertyChanged(nameof(WiredControlActionText));
+        StartWiredControlCommand.NotifyCanExecuteChanged();
+        StopWiredControlCommand.NotifyCanExecuteChanged();
+        ToggleWiredControlCommand.NotifyCanExecuteChanged();
+    }
 
     public async Task RefreshAsync(bool forceDeviceEnumeration = false)
     {
@@ -1899,6 +2072,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     {
         if (!_disposed && _bluetoothControlEnabled && !HasBluetoothControlTargetSession)
             _ = StopBluetoothControlAsync();
+        if (!_disposed && IsWiredControlEnabled && !HasWiredControlTargetSession)
+            _ = DisableWiredControlAsync();
         OnPropertyChanged(nameof(CurrentSessionHandle));
         OnPropertyChanged(nameof(HasCaptureSession));
         OnPropertyChanged(nameof(PreviewAndObsVisibility));
@@ -3708,6 +3883,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(AppliedWirelessProfileDisplay));
         OnPropertyChanged(nameof(BluetoothControlActionText));
         OnPropertyChanged(nameof(BluetoothDeviceOrientationDisplay));
+        OnPropertyChanged(nameof(WiredControlActionText));
         if (_lastEnvironment is { } environment) UpdateEnvironmentStatus(environment);
         else
         {
@@ -4630,6 +4806,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         LocalizationService.LanguageChanged -= OnLanguageChanged;
         BluetoothControlNoticeWindow.ActiveNoticeClosed -= OnBluetoothControlNoticeClosed;
         await _bluetoothControl.DisposeAsync();
+        await _wiredControl.DisposeAsync();
         _mediaOutput.StatusChanged -= OnMediaOutputStatusChanged;
         _virtualCamera.StatusChanged -= OnMediaOutputStatusChanged;
         try

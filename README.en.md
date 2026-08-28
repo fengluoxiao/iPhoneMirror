@@ -119,6 +119,7 @@ geometry, not Apple-published industrial measurements.
 - Media does not pass through an iPhoneMirror cloud relay, and USB capture does not depend on the network.
 - Clean detached windows are ready for OBS, while screenshots read the decoded frame without application UI.
 - Optional BLE HID mouse/keyboard control through iOS AssistiveTouch, with no phone-side app or jailbreak required.
+- Wired control (experimental): mouse and keyboard injection through a WebDriverAgent app on the device, sharing the same USB cable as wired mirroring with lower latency than Bluetooth.
 
 ### Compared with common mirroring tools
 
@@ -389,6 +390,7 @@ the [upgrade roadmap](docs/ROADMAP.md); roadmap items are not implemented featur
 - Apple does not publish Screen Capture as a stable third-party API.
 - AirPlay compatibility is unofficial and can change with future iOS releases.
 - Bluetooth control depends on BLE peripheral mode and iOS AssistiveTouch, and is limited to pointer-style single-touch operations.
+- Wired control requires a one-time signed WebDriverAgent installation on the device (free Apple ID signatures expire every 7 days); keyboard input is English-layout only and dragging is injected in segments.
 
 ## Contributing and security
 
