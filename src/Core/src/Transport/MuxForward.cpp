@@ -42,14 +42,18 @@ std::string narrow_udid(const std::wstring& udid) {
 // requested port. Discovery happens per connection: the device legitimately
 // disappears from usbmux while QuickTime re-enumerates it and its usbmux
 // device id changes on every replug, so a snapshot taken at listener start
-// would go stale.
-bool resolve_and_connect(const ForwardState& state, Socket& tunnel) {
+// would go stale. found_device distinguishes "no such device in usbmux"
+// from "device present but the target port refused the tunnel".
+bool resolve_and_connect(const ForwardState& state, Socket& tunnel,
+                         bool* found_device) {
+    *found_device = false;
     const std::uint16_t* end = KnownMuxPorts + std::size(KnownMuxPorts);
     for (const std::uint16_t* port = KnownMuxPorts; port != end; ++port) {
         try {
             UsbMuxClient mux(*port);
             for (const auto& device : mux.list_devices()) {
                 if (device.serial != state.udid) continue;
+                *found_device = true;
                 tunnel = mux.connect_device(device.device_id, state.device_port);
                 return true;
             }
@@ -73,7 +77,8 @@ void relay_connection(std::shared_ptr<ForwardState> state, SOCKET client) {
     state->active_connections.fetch_add(1);
     try {
         Socket tunnel;
-        if (!resolve_and_connect(*state, tunnel)) {
+        bool found_device = false;
+        if (!resolve_and_connect(*state, tunnel, &found_device)) {
             // The device is absent from usbmux (replug, QuickTime
             // re-enumeration) or WDA is not listening yet. Report the state
             // of the mux list once every few seconds instead of per retry.
@@ -92,9 +97,11 @@ void relay_connection(std::shared_ptr<ForwardState> state, SOCKET client) {
                         }
                     }
                 } catch (...) {}
-                logging::write(std::format(
-                    "mux_forward device_not_found udid={} mux_devices=[{}]",
-                    state->udid, serials));
+                logging::write(found_device
+                    ? std::format("mux_forward connect_failed udid={} (device present; target port refused)",
+                        state->udid)
+                    : std::format("mux_forward device_not_found udid={} mux_devices=[{}]",
+                        state->udid, serials));
             }
             ::closesocket(client);
             state->active_connections.fetch_sub(1);

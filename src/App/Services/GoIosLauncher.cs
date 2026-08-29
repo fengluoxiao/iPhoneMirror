@@ -28,30 +28,28 @@ internal sealed class GoIosLauncher : IAsyncDisposable
 
     /// <summary>
     /// Ensures the developer tunnel is up and starts the preinstalled WDA
-    /// runner. Returns false with <see cref="LastError"/> set on failure.
+    /// runner. Returns false with a non-empty <paramref name="error"/>
+    /// describing the exact failing step.
     /// </summary>
-    internal async Task<bool> LaunchAsync(string udid, CancellationToken cancellationToken)
+    internal async Task<(bool Ok, string? Error)> LaunchAsync(
+        string udid, CancellationToken cancellationToken)
     {
-        if (!IsAvailable)
-        {
-            LastError = "goios_missing";
-            return false;
-        }
+        if (!IsAvailable) return (false, "goios_missing");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_wdaProcess is { HasExited: false }) return true;
+            if (_wdaProcess is { HasExited: false })
+                return (true, "wda_already_running");
 
-            if (!await EnsureTunnelAsync(udid, cancellationToken).ConfigureAwait(false))
-                return false;
-
-            var (hostBundle, testBundle) = await DiscoverWdaBundlesAsync(
+            var (tunnelOk, tunnelError) = await EnsureTunnelAsync(
                 udid, cancellationToken).ConfigureAwait(false);
+            if (!tunnelOk) return (false, tunnelError);
+
+            var (hostBundle, testBundle, discoverError) = await DiscoverWdaBundlesAsync(
+                udid, cancellationToken).ConfigureAwait(false);
+            if (discoverError is not null) return (false, discoverError);
             if (hostBundle is null || testBundle is null)
-            {
-                LastError = "wda_not_installed";
-                return false;
-            }
+                return (false, "wda_not_installed");
 
             return await StartWdaAsync(udid, hostBundle, testBundle, cancellationToken)
                 .ConfigureAwait(false);
@@ -62,16 +60,13 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         }
         catch (Exception error)
         {
-            LastError = $"goios_error:{error.Message}";
-            return false;
+            return (false, $"goios_error:{error.Message}");
         }
         finally
         {
             _gate.Release();
         }
     }
-
-    internal string? LastError { get; private set; }
 
     internal void Stop()
     {
@@ -86,25 +81,20 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         }
     }
 
-    private async Task<bool> EnsureTunnelAsync(
+    private async Task<(bool Ok, string? Error)> EnsureTunnelAsync(
         string udid, CancellationToken cancellationToken)
     {
         // The tunnel agent keeps a registration in its info API; a second
         // start is harmless but a healthy listing avoids stacking agents.
-        var listing = await RunCaptureAsync(
-            ["tunnel", "ls", TunnelInfoPortArg, $"--udid={udid}"],
-            TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
-        if (listing.ExitCode == 0 && (listing.Output.Contains("rsdPort") ||
-            listing.Output.Contains("RsdAddress") || listing.Output.Contains("tunnel")))
-            return true;
+        // Only an entry with a real RSD endpoint counts; the JSON wrapper
+        // always contains the word "tunnel" even when the list is empty.
+        var (healthy, _) = await TunnelListingAsync(udid, cancellationToken)
+            .ConfigureAwait(false);
+        if (healthy) return (true, null);
 
         _tunnelAgent = StartDetached(["tunnel", "start", "--userspace",
             TunnelInfoPortArg, $"--udid={udid}"]);
-        if (_tunnelAgent is null)
-        {
-            LastError = "goios_tunnel_start_failed";
-            return false;
-        }
+        if (_tunnelAgent is null) return (false, "goios_tunnel_start_failed");
         // Give the agent time to establish the CoreDevice tunnel; a fresh
         // pairing may wait for the trust prompt on the device.
         for (var attempt = 0; attempt < 12; attempt++)
@@ -113,43 +103,49 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 .ConfigureAwait(false);
             if (_tunnelAgent.HasExited)
             {
-                LastError = $"goios_tunnel_exited:{_tunnelAgent.ExitCode}";
-                _tunnelAgent.Dispose();
+                var error = $"goios_tunnel_exited:{_tunnelAgent.ExitCode}";
+                TryKill(_tunnelAgent);
                 _tunnelAgent = null;
-                return false;
+                return (false, error);
             }
-            listing = await RunCaptureAsync(
-                ["tunnel", "ls", TunnelInfoPortArg, $"--udid={udid}"],
-                TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
-            if (listing.ExitCode == 0 && (listing.Output.Contains("rsdPort") ||
-                listing.Output.Contains("RsdAddress")))
-                return true;
+            var (ok, _) = await TunnelListingAsync(udid, cancellationToken)
+                .ConfigureAwait(false);
+            if (ok) return (true, null);
         }
-        LastError = "goios_tunnel_timeout";
-        return false;
+        return (false, "goios_tunnel_timeout");
     }
 
-    private async Task<(string? HostBundle, string? TestBundle)> DiscoverWdaBundlesAsync(
+    private async Task<(bool Healthy, string Output)> TunnelListingAsync(
         string udid, CancellationToken cancellationToken)
     {
-        var listing = await RunCaptureAsync(["apps", $"--udid={udid}"],
+        var (exitCode, output) = await RunCaptureAsync(
+            ["tunnel", "ls", TunnelInfoPortArg, $"--udid={udid}"],
+            TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+        var healthy = exitCode == 0 && (output.Contains("rsdPort") ||
+            output.Contains("RsdAddress"));
+        return (healthy, output);
+    }
+
+    private async Task<(string? HostBundle, string? TestBundle, string? Error)>
+        DiscoverWdaBundlesAsync(string udid, CancellationToken cancellationToken)
+    {
+        var (exitCode, output) = await RunCaptureAsync(["apps", $"--udid={udid}"],
             TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
-        if (listing.ExitCode != 0)
-        {
-            LastError = "goios_apps_query_failed";
-            return (null, null);
-        }
-        var ids = Regex.Matches(listing.Output,
-            "\"bundleId\"\\s*:\\s*\"([^\"]*WebDriverAgentRunner[^\"]*)\"")
+        if (exitCode != 0)
+            return (null, null, $"goios_apps_query_failed:{exitCode}");
+        var ids = Regex.Matches(output,
+                "\"bundleId\"\\s*:\\s*\"([^\"]*WebDriverAgentRunner[^\"]*)\"")
             .Select(match => match.Groups[1].Value)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        var host = ids.FirstOrDefault(id => id.Contains("xctrunner", StringComparison.OrdinalIgnoreCase));
-        var test = ids.FirstOrDefault(id => !id.Contains("xctrunner", StringComparison.OrdinalIgnoreCase));
-        return (host, test);
+        var host = ids.FirstOrDefault(id =>
+            id.Contains("xctrunner", StringComparison.OrdinalIgnoreCase));
+        var test = ids.FirstOrDefault(id =>
+            !id.Contains("xctrunner", StringComparison.OrdinalIgnoreCase));
+        return (host, test, null);
     }
 
-    private async Task<bool> StartWdaAsync(
+    private async Task<(bool Ok, string? Error)> StartWdaAsync(
         string udid, string hostBundle, string testBundle,
         CancellationToken cancellationToken)
     {
@@ -163,11 +159,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             $"--udid={udid}",
             $"--log-output={_wdaLogPath}",
         ]);
-        if (_wdaProcess is null)
-        {
-            LastError = "goios_runwda_start_failed";
-            return false;
-        }
+        if (_wdaProcess is null) return (false, "goios_runwda_start_failed");
         // runwda keeps running for the whole WDA session. An early exit means
         // the launch was rejected; its log file carries the actual reason.
         for (var attempt = 0; attempt < 12; attempt++)
@@ -177,19 +169,17 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             if (_wdaProcess.HasExited)
             {
                 var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
-                LastError = $"goios_runwda_exited:{_wdaProcess.ExitCode}:{tail}";
-                return false;
+                return (false,
+                    $"goios_runwda_exited:{_wdaProcess.ExitCode}:{tail}");
             }
-            // Any output at all means testmanagerd accepted the session.
-            if (new FileInfo(_wdaLogPath) is { Exists: true, Length: > 0 } log)
-            {
-                var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
-                if (tail.Contains("Server started", StringComparison.OrdinalIgnoreCase) ||
-                    tail.Contains("WebDriverAgent", StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
+            var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
+            if (tail.Contains("Server started", StringComparison.OrdinalIgnoreCase))
+                return (true, "wda_server_started");
         }
-        return true;
+        var finalTail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
+        return (true, string.IsNullOrEmpty(finalTail)
+            ? "wda_process_alive_no_output"
+            : $"wda_process_alive tail={finalTail}");
     }
 
     private static async Task<string> ReadLogTailAsync(string? path)
@@ -225,8 +215,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             RedirectStandardError = false,
         };
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
-        var process = Process.Start(startInfo);
-        return process;
+        return Process.Start(startInfo);
     }
 
     private async Task<(int ExitCode, string Output)> RunCaptureAsync(
@@ -253,7 +242,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         if (completed != exitTask)
         {
             TryKill(process);
-            return (-1, output.ToString());
+            return (-1, "goios_command_timeout");
         }
         output.Append(await stdout.ConfigureAwait(false));
         output.Append(await stderr.ConfigureAwait(false));

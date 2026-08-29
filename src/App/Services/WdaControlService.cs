@@ -241,11 +241,14 @@ internal sealed class WdaControlService : IAsyncDisposable
                     Stopwatch.GetTimestamp() >= nextLaunchAt)
                 {
                     LastError = null;
-                    var launched = await _launcher.LaunchAsync(_udid ?? string.Empty,
-                        cancellationToken).ConfigureAwait(false);
+                    var (launched, launchError) = await _launcher.LaunchAsync(
+                        _udid ?? string.Empty, cancellationToken).ConfigureAwait(false);
+                    if (!launched) LastError = launchError;
                     ReportDiagnostic(launched
-                        ? "wda_launch_requested"
-                        : $"wda_launch_failed error={LastError}");
+                        ? string.IsNullOrEmpty(launchError)
+                            ? "wda_launch_requested"
+                            : $"wda_launch_requested detail={launchError}"
+                        : $"wda_launch_failed error={launchError}");
                     nextLaunchAt = Stopwatch.GetTimestamp() +
                         LaunchCooldownMs * Stopwatch.Frequency / 1000;
                 }
