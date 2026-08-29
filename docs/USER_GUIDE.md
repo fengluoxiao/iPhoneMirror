@@ -138,10 +138,16 @@ WebDriverAgent（WDA）应用，把 Windows 的鼠标与键盘输入直接注入
 
 1. 开启开发者模式：设置 → 隐私与安全性 → 开发者模式（需要重启手机）。
 2. 安装并签名 WebDriverAgent。WDA 是 Appium 社区维护的开源组件（MIT），
-   需要有效签名才能运行，请从可信渠道获取与设备 iOS 版本匹配的版本，
-   iPhoneMirror 不重新分发 WDA 二进制。常见方式：
-   - 有 Mac：用 Xcode 打开 WDA 工程，选择自己的开发者团队后安装；
-   - 只有 Windows：使用 Sideloadly、AltStore 等工具，用 Apple ID 为
+   iPhoneMirror 不重新分发 WDA 二进制，需要用你自己的 Apple ID 签名后安装。
+   推荐使用 Appium 官方仓库持续发布的真机构建（最新版即可，基于 iOS 18 SDK，
+   支持 iOS 17/18）：
+   - 下载：<https://github.com/appium/WebDriverAgent/releases/latest> 中的
+     `WebDriverAgentRunner-Runner.zip`；
+   - 打包成 ipa：解压得到 `WebDriverAgentRunner-Runner.app`，新建 `Payload`
+     文件夹并放入该 .app，把整个 `Payload` 文件夹压缩成 zip，将后缀名改为
+     `.ipa`；
+   - 有 Mac：也可以用 Xcode 打开 WDA 工程，选择自己的开发者团队后安装；
+   - 只有 Windows：使用 Sideloadly、AltStore 等工具，用 Apple ID 为上一步的
      WebDriverAgent.ipa 签名并安装。免费 Apple ID 的签名 7 天过期，过期后需要
      连接电脑重新签名；付费开发者账号（每年 $99）签名有效期为一年。
 3. 在手机上点开 WebDriverAgent 应用并保持前台（白屏即正常）。
