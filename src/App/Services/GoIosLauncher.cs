@@ -168,9 +168,9 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 .ConfigureAwait(false);
             if (_wdaProcess.HasExited)
             {
-                var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
+                var exitTail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
                 return (false,
-                    $"goios_runwda_exited:{_wdaProcess.ExitCode}:{tail}");
+                    $"goios_runwda_exited:{_wdaProcess.ExitCode}:{exitTail}");
             }
             var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
             if (tail.Contains("Server started", StringComparison.OrdinalIgnoreCase))
