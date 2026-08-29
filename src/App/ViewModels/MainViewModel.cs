@@ -326,18 +326,16 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal bool IsWiredControlTarget(string? udid) => IsWiredControlEnabled &&
         DeviceViewModel.UdidEquals(_wiredControlDeviceUdid, udid);
 
+    // Wired control does not need an active mirroring session: the WDA
+    // tunnel actually requires the phone to be OUT of the QuickTime USB
+    // configuration, so it is launched before mirroring starts and keeps
+    // running independently of it.
     private bool CanEnableWiredControlFor(string? deviceUdid) =>
         !_wiredControlStarting && !IsWiredControlEnabled && !IsBusy &&
         !string.IsNullOrWhiteSpace(deviceUdid) &&
         !DeviceViewModel.IsWirelessUdid(deviceUdid) &&
-        !DeviceViewModel.IsMediaCastUdid(deviceUdid) &&
-        _sessions.TryGet(deviceUdid, out var wiredSession) &&
-        IsSessionPresentable(wiredSession);
+        !DeviceViewModel.IsMediaCastUdid(deviceUdid);
 
-    private bool HasWiredControlTargetSession =>
-        !string.IsNullOrWhiteSpace(_wiredControlDeviceUdid) &&
-        _sessions.TryGet(_wiredControlDeviceUdid, out var wiredSession) &&
-        IsSessionPresentable(wiredSession);
     public double BluetoothMouseSensitivity
     {
         get => _bluetoothMouseSensitivity;
@@ -2090,8 +2088,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     {
         if (!_disposed && _bluetoothControlEnabled && !HasBluetoothControlTargetSession)
             _ = StopBluetoothControlAsync();
-        if (!_disposed && IsWiredControlEnabled && !HasWiredControlTargetSession)
-            _ = DisableWiredControlAsync();
+        // Wired control survives mirroring session changes: it is launched
+        // before mirroring and does not depend on the capture session.
         OnPropertyChanged(nameof(CurrentSessionHandle));
         OnPropertyChanged(nameof(HasCaptureSession));
         OnPropertyChanged(nameof(PreviewAndObsVisibility));
