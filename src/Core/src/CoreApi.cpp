@@ -2095,7 +2095,7 @@ std::int32_t IM_CALL im_mux_forward_start(const wchar_t* udid,
 }
 
 void IM_CALL im_mux_forward_stop(std::uint16_t local_port) {
-    transport::MuxForward::stop(local_port);
+    iPhoneMirror::transport::MuxForward::stop(local_port);
 }
 
 const wchar_t* IM_CALL im_last_error() { return last_error.c_str(); }
