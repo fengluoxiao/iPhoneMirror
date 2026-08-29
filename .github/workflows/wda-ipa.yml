@@ -1,0 +1,49 @@
+name: Package WebDriverAgent ipa
+run-name: Package WebDriverAgent ipa (manual dev artifact)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wda-ipa
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: repack official runner build
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Fetch the latest official WebDriverAgent device build
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod `
+            "https://api.github.com/repos/appium/WebDriverAgent/releases/latest"
+          $asset = $release.assets |
+            Where-Object { $_.name -eq 'WebDriverAgentRunner-Runner.zip' }
+          if (-not $asset) { throw "runner zip asset not found" }
+          Write-Host "Source: WebDriverAgent $($release.tag_name), published $($release.published_at)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile wda-runner.zip
+          Expand-Archive wda-runner.zip -DestinationPath build
+
+      - name: Repack as an installable ipa
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ipa/Payload | Out-Null
+          Move-Item build/WebDriverAgentRunner-Runner.app ipa/Payload/
+          # bsdtar (bsdtar -a) writes forward-slash zip entries, which the
+          # iOS installer requires; Compress-Archive historically does not.
+          tar -a -cf WebDriverAgent.ipa -C ipa Payload
+          Get-Item WebDriverAgent.ipa | Select-Object Name, Length
+
+      - name: Upload unsigned ipa for personal signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-ipa
+          path: WebDriverAgent.ipa
+          retention-days: 7
+          if-no-files-found: error
