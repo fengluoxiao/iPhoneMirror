@@ -148,7 +148,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             var (_, pendingListing) = await TunnelListingAsync(udid, cancellationToken)
                 .ConfigureAwait(false);
             var outputTail = agentOutput().Trim();
-            return (false, $"{mode}:timeout ls={pendingListing.Output} agent=[{outputTail}]");
+            return (false, $"{mode}:timeout ls={pendingListing} agent=[{outputTail}]");
         }
         finally
         {
@@ -241,14 +241,14 @@ internal sealed class GoIosLauncher : IAsyncDisposable
     {
         _wdaLogPath = Path.Combine(Path.GetTempPath(),
             $"iPhoneMirror-wda-{Environment.TickCount64:x}.log");
-        _wdaProcess = StartDetached([
+        _wdaProcess = StartDetachedWithCapture([
             "runwda",
             $"--bundleid={hostBundle}",
             $"--testrunnerbundleid={testBundle}",
             $"--xctestconfig={WdaConfigName}",
             $"--udid={udid}",
             $"--log-output={_wdaLogPath}",
-        ]);
+        ], out _);
         if (_wdaProcess is null) return (false, "goios_runwda_start_failed");
         // runwda keeps running for the whole WDA session. An early exit means
         // the launch was rejected; its log file carries the actual reason.
