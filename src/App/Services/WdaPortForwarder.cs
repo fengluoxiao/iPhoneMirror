@@ -7,7 +7,9 @@ namespace IPhoneMirror.App.Services;
 /// usbmux forwarder (iproxy semantics: one usbmux tunnel per accepted
 /// connection, so HttpClient connection pooling maps to parallel tunnels).
 /// The tunnel lives in iPhoneMirror.Core, which uses the same proven
-/// usbmux client as the QuickTime capture pipeline.
+/// usbmux client as the QuickTime capture pipeline. Device resolution
+/// happens per connection inside Core, so the listener binds immediately
+/// even while the phone is re-enumerating for QuickTime or after a replug.
 /// </summary>
 internal sealed class WdaPortForwarder : IAsyncDisposable
 {

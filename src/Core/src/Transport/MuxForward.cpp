@@ -1,5 +1,6 @@
 #include "Transport/MuxForward.h"
 
+#include "Logging.h"
 #include "Transport/Socket.h"
 #include "Transport/UsbMuxClient.h"
 
@@ -8,6 +9,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <format>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,8 +26,7 @@ struct ForwardState {
     std::atomic<bool> stopping{false};
     std::atomic<int> active_connections{0};
     SOCKET listener{INVALID_SOCKET};
-    std::uint32_t device_id{};
-    std::uint16_t mux_port{};
+    std::string udid;
     std::uint16_t device_port{};
 };
 
@@ -36,18 +38,20 @@ std::string narrow_udid(const std::wstring& udid) {
     return std::string(udid.begin(), udid.end());
 }
 
-bool find_device(const std::wstring& udid, std::uint16_t* mux_port,
-                 std::uint32_t* device_id) {
-    const std::string serial = narrow_udid(udid);
-    for (const std::uint16_t port : KnownMuxPorts) {
+// Resolves the usbmux device for the stored UDID and opens a tunnel to the
+// requested port. Discovery happens per connection: the device legitimately
+// disappears from usbmux while QuickTime re-enumerates it and its usbmux
+// device id changes on every replug, so a snapshot taken at listener start
+// would go stale.
+bool resolve_and_connect(const ForwardState& state, Socket& tunnel) {
+    const std::uint16_t* end = KnownMuxPorts + std::size(KnownMuxPorts);
+    for (const std::uint16_t* port = KnownMuxPorts; port != end; ++port) {
         try {
-            UsbMuxClient mux(port);
+            UsbMuxClient mux(*port);
             for (const auto& device : mux.list_devices()) {
-                if (device.serial == serial) {
-                    *mux_port = port;
-                    *device_id = device.device_id;
-                    return true;
-                }
+                if (device.serial != state.udid) continue;
+                tunnel = mux.connect_device(device.device_id, state.device_port);
+                return true;
             }
         } catch (...) {
             // Port not published or transient IPC failure: try the next one.
@@ -68,14 +72,39 @@ void send_all(SOCKET handle, const char* data, int length) {
 void relay_connection(std::shared_ptr<ForwardState> state, SOCKET client) {
     state->active_connections.fetch_add(1);
     try {
-        UsbMuxClient mux(state->mux_port);
-        // connect_device applies htons internally and expects host order.
-        Socket device = mux.connect_device(state->device_id, state->device_port);
+        Socket tunnel;
+        if (!resolve_and_connect(*state, tunnel)) {
+            // The device is absent from usbmux (replug, QuickTime
+            // re-enumeration) or WDA is not listening yet. Report the state
+            // of the mux list once every few seconds instead of per retry.
+            static std::atomic<std::int64_t> last_report_ms{};
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const auto previous = last_report_ms.load(std::memory_order_relaxed);
+            if (now_ms - previous > 5000 &&
+                last_report_ms.compare_exchange_strong(previous, now_ms)) {
+                std::string serials;
+                try {
+                    for (const std::uint16_t port : KnownMuxPorts) {
+                        UsbMuxClient mux(port);
+                        for (const auto& device : mux.list_devices()) {
+                            serials += device.serial + " ";
+                        }
+                    }
+                } catch (...) {}
+                logging::write(std::format(
+                    "mux_forward device_not_found udid={} mux_devices=[{}]",
+                    state->udid, serials));
+            }
+            ::closesocket(client);
+            state->active_connections.fetch_sub(1);
+            return;
+        }
         // The tunnel carries traffic for the whole WDA session; drop the
         // 1.5s handshake timeout connect_device installs.
-        device.set_timeout(0);
+        tunnel.set_timeout(0);
 
-        const SOCKET device_handle = device.native_handle();
+        const SOCKET device_handle = tunnel.native_handle();
         std::array<char, 16 * 1024> buffer{};
         for (;;) {
             fd_set read_set;
@@ -135,12 +164,6 @@ std::int32_t MuxForward::start(const std::wstring& udid, std::uint16_t device_po
     }
     try {
         ensure_winsock();
-        std::uint16_t mux_port{};
-        std::uint32_t device_id{};
-        if (!find_device(udid, &mux_port, &device_id)) {
-            return static_cast<std::int32_t>(MuxForwardResult::DeviceNotFound);
-        }
-
         const SOCKET listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (listener == INVALID_SOCKET) {
             return static_cast<std::int32_t>(MuxForwardResult::TransportUnavailable);
@@ -165,8 +188,7 @@ std::int32_t MuxForward::start(const std::wstring& udid, std::uint16_t device_po
 
         auto state = std::make_shared<ForwardState>();
         state->listener = listener;
-        state->device_id = device_id;
-        state->mux_port = mux_port;
+        state->udid = narrow_udid(udid);
         state->device_port = device_port;
         const std::uint16_t bound_port = ntohs(bound.sin_port);
 

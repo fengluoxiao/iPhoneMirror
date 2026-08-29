@@ -240,6 +240,7 @@ internal sealed class WdaControlService : IAsyncDisposable
                 if (_launcher.IsAvailable &&
                     Stopwatch.GetTimestamp() >= nextLaunchAt)
                 {
+                    LastError = null;
                     var launched = await _launcher.LaunchAsync(_udid ?? string.Empty,
                         cancellationToken).ConfigureAwait(false);
                     ReportDiagnostic(launched
