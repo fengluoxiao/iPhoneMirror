@@ -57,6 +57,21 @@ public sealed partial class WdaControlNoticeWindow :
     public Visibility WaitingStepsVisibility => _state == NoticeState.Waiting
         ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>Live launch-pipeline status shown inside the waiting dialog.</summary>
+    internal static event Action<string>? StatusDetailPublished;
+
+    private string? _liveStatus;
+
+    public string LiveStatusText => _liveStatus ?? string.Empty;
+
+    public Visibility LiveStatusVisibility => _state == NoticeState.Waiting &&
+        !string.IsNullOrWhiteSpace(_liveStatus) ? Visibility.Visible : Visibility.Collapsed;
+
+    internal static void PublishStatusDetail(string detail)
+    {
+        StatusDetailPublished?.Invoke(detail);
+    }
+
     private WdaControlNoticeWindow(Window owner)
     {
         Owner = owner;
@@ -65,12 +80,21 @@ public sealed partial class WdaControlNoticeWindow :
         _closeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _closeTimer.Tick += OnCloseTimerTick;
         LocalizationService.LanguageChanged += OnLanguageChanged;
+        StatusDetailPublished += OnStatusDetailPublished;
         Closed += (_, _) =>
         {
             _closeTimer.Stop();
             LocalizationService.LanguageChanged -= OnLanguageChanged;
+            StatusDetailPublished -= OnStatusDetailPublished;
             if (ReferenceEquals(_active, this)) _active = null;
         };
+    }
+
+    private void OnStatusDetailPublished(string detail)
+    {
+        _liveStatus = detail;
+        OnPropertyChanged(nameof(LiveStatusText));
+        OnPropertyChanged(nameof(LiveStatusVisibility));
     }
 
     internal static void ShowWaiting(Window owner)
@@ -139,6 +163,7 @@ public sealed partial class WdaControlNoticeWindow :
         _remainingSeconds = 5;
         _closeTimer.Stop();
         if (state == NoticeState.Connected) _closeTimer.Start();
+        if (state != NoticeState.Waiting) _liveStatus = null;
         OnPropertyChanged(nameof(TitleText));
         OnPropertyChanged(nameof(BodyText));
         OnPropertyChanged(nameof(DetailText));
@@ -148,6 +173,8 @@ public sealed partial class WdaControlNoticeWindow :
         OnPropertyChanged(nameof(StepFourText));
         OnPropertyChanged(nameof(StepFiveText));
         OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(LiveStatusText));
+        OnPropertyChanged(nameof(LiveStatusVisibility));
         OnPropertyChanged(nameof(WaitingStepsVisibility));
         SetupStepsPanel.Visibility = WaitingStepsVisibility;
         ReflowToContent();

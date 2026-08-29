@@ -1035,8 +1035,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         PressWiredPhoneVolumeDownCommand = new RelayCommand(
             () => _ = _wiredControl.PressButtonAsync("volumeDown"));
         _wiredControl.StateChanged += OnWiredControlStateChanged;
-        _wiredControl.DiagnosticSink = detail => AddDiagnosticLog(
-            AppLog.Event("wired_control_launch", ("detail", detail)));
+        _wiredControl.DiagnosticSink = detail =>
+        {
+            AddDiagnosticLog(AppLog.Event("wired_control_launch", ("detail", detail)));
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+                WdaControlNoticeWindow.PublishStatusDetail(detail));
+        };
         BluetoothControlNoticeWindow.ActiveNoticeClosed += OnBluetoothControlNoticeClosed;
         _bluetoothControl.StatusChanged += (_, _) =>
         {
