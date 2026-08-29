@@ -50,7 +50,8 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 udid, cancellationToken).ConfigureAwait(false);
             if (discoverError is not null) return (false, discoverError);
             if (hostBundle is null || testBundle is null)
-                return (false, "wda_not_installed");
+                return (false,
+                    $"wda_not_installed host={hostBundle ?? "none"} test={testBundle ?? "none"}");
 
             return await StartWdaAsync(udid, hostBundle, testBundle, cancellationToken)
                 .ConfigureAwait(false);
@@ -248,9 +249,13 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
         if (exitCode != 0)
             return (null, null, $"goios_apps_query_failed:{exitCode}");
+        // The apps JSON uses several different key names across go-ios
+        // versions; scan for the bundle identifiers themselves instead.
         var ids = Regex.Matches(output,
-                "\"bundleId\"\\s*:\\s*\"([^\"]*WebDriverAgentRunner[^\"]*)\"")
-            .Select(match => match.Groups[1].Value)
+                "[A-Za-z0-9.-]*WebDriverAgentRunner[A-Za-z0-9.-]*")
+            .Select(match => match.Value)
+            .Where(id => id.Contains('.') &&
+                id.StartsWith("com.", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var host = ids.FirstOrDefault(id =>
