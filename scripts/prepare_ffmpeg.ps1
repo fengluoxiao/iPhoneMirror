@@ -14,11 +14,14 @@ $Manifest = Import-PowerShellDataFile -LiteralPath $ManifestPath
 $Version = [string]$Manifest.Version
 $ArchiveName = [string]$Manifest.ArchiveName
 $DownloadUrl = [string]$Manifest.DownloadUrl
+# The same upstream build is published on GitHub; used when gyan.dev is down.
+$MirrorUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$Version/$ArchiveName"
+$DownloadUrls = @($DownloadUrl, $MirrorUrl) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ExpectedSha256 = [string]$Manifest.ArchiveSha256
 $ExpectedFiles = [Collections.IDictionary]$Manifest.Files
 if ([string]::IsNullOrWhiteSpace($Version) -or
     [string]::IsNullOrWhiteSpace($ArchiveName) -or
-    [string]::IsNullOrWhiteSpace($DownloadUrl) -or
+    $DownloadUrls.Count -eq 0 -or
     $ExpectedSha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
     $ExpectedFiles.Count -eq 0) {
     throw 'FFmpeg runtime manifest is invalid.'
@@ -42,48 +45,59 @@ if ($ArchiveValid) {
 }
 if (-not $ArchiveValid) {
     $DownloadPath = "$ArchivePath.download"
-    $MaximumAttempts = 4
-    $RetryDelaysSeconds = @(5, 15, 30)
-    for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
-        if (Test-Path -LiteralPath $DownloadPath) {
-            Remove-Item -LiteralPath $DownloadPath -Force
-        }
-
-        try {
-            Write-Host "Downloading FFmpeg runtime (attempt $Attempt of $MaximumAttempts)..."
-            Invoke-WebRequest -Uri $DownloadUrl -OutFile $DownloadPath `
-                -UseBasicParsing -TimeoutSec 300
-            break
-        }
-        catch {
+    $MaximumAttemptsPerUrl = 3
+    $RetryDelaysSeconds = @(5, 15)
+    $Downloaded = $false
+    foreach ($DownloadUrl in $DownloadUrls) {
+        if ($Downloaded) { break }
+        $MaximumAttempts = $MaximumAttemptsPerUrl
+        for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
             if (Test-Path -LiteralPath $DownloadPath) {
                 Remove-Item -LiteralPath $DownloadPath -Force
             }
 
-            $StatusCode = $null
-            if ($null -ne $_.Exception.Response -and
-                $null -ne $_.Exception.Response.StatusCode) {
-                $StatusCode = [int]$_.Exception.Response.StatusCode
+            try {
+                Write-Host "Downloading FFmpeg runtime from $DownloadUrl (attempt $Attempt of $MaximumAttempts)..."
+                Invoke-WebRequest -Uri $DownloadUrl -OutFile $DownloadPath `
+                    -UseBasicParsing -TimeoutSec 300
+                $Downloaded = $true
+                break
             }
-            $IsTransientFailure = $null -eq $StatusCode -or
-                $StatusCode -eq 408 -or
-                $StatusCode -eq 429 -or
-                $StatusCode -ge 500
+            catch {
+                if (Test-Path -LiteralPath $DownloadPath) {
+                    Remove-Item -LiteralPath $DownloadPath -Force
+                }
 
-            if (-not $IsTransientFailure -or $Attempt -eq $MaximumAttempts) {
-                throw
-            }
+                $StatusCode = $null
+                if ($null -ne $_.Exception.Response -and
+                    $null -ne $_.Exception.Response.StatusCode) {
+                    $StatusCode = [int]$_.Exception.Response.StatusCode
+                }
+                $IsTransientFailure = $null -eq $StatusCode -or
+                    $StatusCode -eq 408 -or
+                    $StatusCode -eq 429 -or
+                    $StatusCode -ge 500
 
-            $DelaySeconds = $RetryDelaysSeconds[$Attempt - 1]
-            $FailureDescription = if ($null -eq $StatusCode) {
-                $_.Exception.Message
+                if (-not $IsTransientFailure -or $Attempt -eq $MaximumAttempts) {
+                    Write-Warning "FFmpeg download from $DownloadUrl failed with $($_.Exception.Message)."
+                    break
+                }
+
+                $DelaySeconds = $RetryDelaysSeconds[$Attempt - 1]
+                $FailureDescription = if ($null -eq $StatusCode) {
+                    $_.Exception.Message
+                }
+                else {
+                    "HTTP $StatusCode"
+                }
+                Write-Warning "FFmpeg download failed with $FailureDescription. Retrying in $DelaySeconds seconds."
+                Start-Sleep -Seconds $DelaySeconds
             }
-            else {
-                "HTTP $StatusCode"
-            }
-            Write-Warning "FFmpeg download failed with $FailureDescription. Retrying in $DelaySeconds seconds."
-            Start-Sleep -Seconds $DelaySeconds
         }
+    }
+
+    if (-not $Downloaded -or -not (Test-Path -LiteralPath $DownloadPath -PathType Leaf)) {
+        throw "All FFmpeg download sources failed: $($DownloadUrls -join ', ')"
     }
 
     $ActualHash = (Get-FileHash -LiteralPath $DownloadPath -Algorithm SHA256).Hash
