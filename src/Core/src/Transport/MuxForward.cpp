@@ -80,7 +80,7 @@ void relay_connection(std::shared_ptr<ForwardState> state, SOCKET client) {
             static std::atomic<std::int64_t> last_report_ms{};
             const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            const auto previous = last_report_ms.load(std::memory_order_relaxed);
+            auto previous = last_report_ms.load(std::memory_order_relaxed);
             if (now_ms - previous > 5000 &&
                 last_report_ms.compare_exchange_strong(previous, now_ms)) {
                 std::string serials;
