@@ -84,35 +84,125 @@ internal sealed class GoIosLauncher : IAsyncDisposable
     private async Task<(bool Ok, string? Error)> EnsureTunnelAsync(
         string udid, CancellationToken cancellationToken)
     {
-        // The tunnel agent keeps a registration in its info API; a second
-        // start is harmless but a healthy listing avoids stacking agents.
-        // Only an entry with a real RSD endpoint counts; the JSON wrapper
-        // always contains the word "tunnel" even when the list is empty.
-        var (healthy, _) = await TunnelListingAsync(udid, cancellationToken)
+        // A tunnel agent left over from an earlier session may still own the
+        // info port without having any tunnel; stop it before starting fresh.
+        var (healthy, listing) = await TunnelListingAsync(udid, cancellationToken)
             .ConfigureAwait(false);
         if (healthy) return (true, null);
-
-        _tunnelAgent = StartDetached(["tunnel", "start", "--userspace",
-            TunnelInfoPortArg, $"--udid={udid}"]);
-        if (_tunnelAgent is null) return (false, "goios_tunnel_start_failed");
-        // Give the agent time to establish the CoreDevice tunnel; a fresh
-        // pairing may wait for the trust prompt on the device.
-        for (var attempt = 0; attempt < 12; attempt++)
+        if (listing.Contains("tunnel", StringComparison.OrdinalIgnoreCase))
         {
+            await RunCaptureAsync(["tunnel", "stopagent"], TimeSpan.FromSeconds(10),
+                cancellationToken).ConfigureAwait(false);
             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken)
                 .ConfigureAwait(false);
-            if (_tunnelAgent.HasExited)
-            {
-                var error = $"goios_tunnel_exited:{_tunnelAgent.ExitCode}";
-                TryKill(_tunnelAgent);
-                _tunnelAgent = null;
-                return (false, error);
-            }
-            var (ok, _) = await TunnelListingAsync(udid, cancellationToken)
-                .ConfigureAwait(false);
-            if (ok) return (true, null);
         }
-        return (false, "goios_tunnel_timeout");
+
+        // Userspace tunnel first: no admin rights and no wintun requirement.
+        var userspace = await StartAgentAndAwaitAsync(udid, userspaceTun: true,
+            attempts: 30, cancellationToken).ConfigureAwait(false);
+        if (userspace.Ok) return (true, null);
+
+        // Fall back to the kernel tunnel (needs wintun.dll + elevation); its
+        // failure mode is still reported so the cause stays visible.
+        var kernel = await StartAgentAndAwaitAsync(udid, userspaceTun: false,
+            attempts: 15, cancellationToken).ConfigureAwait(false);
+        if (kernel.Ok) return (true, null);
+
+        var (_, finalListing) = await TunnelListingAsync(udid, cancellationToken)
+            .ConfigureAwait(false);
+        return (false,
+            $"goios_tunnel_timeout userspace=[{userspace.Error}] kernel=[{kernel.Error}] ls={finalListing}");
+    }
+
+    private async Task<(bool Ok, string? Error)> StartAgentAndAwaitAsync(
+        string udid, bool userspaceTun, int attempts,
+        CancellationToken cancellationToken)
+    {
+        var mode = userspaceTun ? "userspace" : "kernel";
+        var arguments = userspaceTun
+            ? new[] { "tunnel", "start", "--userspace", TunnelInfoPortArg, $"--udid={udid}" }
+            : new[] { "tunnel", "start", TunnelInfoPortArg, $"--udid={udid}" };
+
+        TryKill(_tunnelAgent);
+        _tunnelAgent = StartDetachedWithCapture(arguments, out var agentOutput);
+        if (_tunnelAgent is null) return (false, $"{mode}:agent_start_failed");
+        try
+        {
+            for (var attempt = 0; attempt < attempts; attempt++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken)
+                    .ConfigureAwait(false);
+                if (_tunnelAgent.HasExited)
+                {
+                    var exitTail = agentOutput().Trim();
+                    var exitCode = SafeExitCode(_tunnelAgent);
+                    var error = $"{mode}:agent_exited:{exitCode}:{exitTail}";
+                    TryKill(_tunnelAgent);
+                    _tunnelAgent = null;
+                    return (false, error);
+                }
+                var (healthy, _) = await TunnelListingAsync(udid, cancellationToken)
+                    .ConfigureAwait(false);
+                if (healthy) return (true, null);
+            }
+            var (_, pendingListing) = await TunnelListingAsync(udid, cancellationToken)
+                .ConfigureAwait(false);
+            var outputTail = agentOutput().Trim();
+            return (false, $"{mode}:timeout ls={pendingListing.Output} agent=[{outputTail}]");
+        }
+        finally
+        {
+            if (_tunnelAgent is { HasExited: true } exited)
+            {
+                exited.Dispose();
+                _tunnelAgent = null;
+            }
+        }
+    }
+
+    private Process? StartDetachedWithCapture(string[] arguments, out Func<string> outputTail)
+    {
+        outputTail = () => string.Empty;
+        var exe = ResolveExePath();
+        if (!File.Exists(exe)) return null;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = exe,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        var process = Process.Start(startInfo);
+        if (process is null) return null;
+        var log = new StringBuilder();
+        var sync = new object();
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is null) return;
+            lock (sync) log.AppendLine(e.Data);
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is null) return;
+            lock (sync) log.AppendLine(e.Data);
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        outputTail = () =>
+        {
+            string snapshot;
+            lock (sync) snapshot = log.ToString();
+            var flattened = snapshot
+                .Replace(Convert.ToString(13), " ")
+                .Replace(Convert.ToString(10), " ")
+                .Trim();
+            return flattened.Length <= 1024
+                ? flattened
+                : flattened[^1024..];
+        };
+        return process;
     }
 
     private async Task<(bool Healthy, string Output)> TunnelListingAsync(
@@ -169,8 +259,8 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             if (_wdaProcess.HasExited)
             {
                 var exitTail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
-                return (false,
-                    $"goios_runwda_exited:{_wdaProcess.ExitCode}:{exitTail}");
+                var exitCode = SafeExitCode(_wdaProcess);
+                return (false, $"goios_runwda_exited:{exitCode}:{exitTail}");
             }
             var tail = await ReadLogTailAsync(_wdaLogPath).ConfigureAwait(false);
             if (tail.Contains("Server started", StringComparison.OrdinalIgnoreCase))
@@ -180,6 +270,11 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         return (true, string.IsNullOrEmpty(finalTail)
             ? "wda_process_alive_no_output"
             : $"wda_process_alive tail={finalTail}");
+    }
+
+    private static int SafeExitCode(Process process)
+    {
+        try { return process.ExitCode; } catch { return -1; }
     }
 
     private static async Task<string> ReadLogTailAsync(string? path)
@@ -194,28 +289,14 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             stream.Seek(offset, SeekOrigin.Begin);
             var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length));
             return Encoding.UTF8.GetString(buffer, 0, read)
-                .Replace("\r", " ").Replace("\n", " ").Trim();
+                .Replace(Convert.ToString(13), " ")
+                .Replace(Convert.ToString(10), " ")
+                .Trim();
         }
         catch
         {
             return string.Empty;
         }
-    }
-
-    private Process? StartDetached(string[] arguments)
-    {
-        var exe = ResolveExePath();
-        if (!File.Exists(exe)) return null;
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = exe,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = false,
-            RedirectStandardError = false,
-        };
-        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
-        return Process.Start(startInfo);
     }
 
     private async Task<(int ExitCode, string Output)> RunCaptureAsync(
