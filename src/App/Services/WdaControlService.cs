@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Text;
@@ -17,9 +18,11 @@ internal enum WdaControlState { Off, Waiting, Connected, Failed }
 internal sealed class WdaControlService : IAsyncDisposable
 {
     private const string PointerId = "iPhoneMirrorPointer";
-    private const int StatusPollWaitingMs = 1500;
-    private const int StatusPollConnectedMs = 4000;
+    private const int HealthProbeConnectedMs = 4000;
+    private const int WaitingLoopMs = 3000;
+    private const int LaunchCooldownMs = 15000;
     private const int GestureTimeoutMs = 4000;
+    private const int ForwarderRecycleAfterFailures = 6;
 
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private readonly SemaphoreSlim _directCallGate = new(1, 1);
@@ -33,9 +36,8 @@ internal sealed class WdaControlService : IAsyncDisposable
     private CancellationTokenSource? _lifecycle;
     private HttpClient? _httpClient;
     private WdaPortForwarder? _forwarder;
-    private Task? _pollLoop;
+    private Task? _serviceLoop;
     private Task? _gestureLoop;
-    private Task? _launchPipeline;
     private string? _sessionId;
     private string? _udid;
     private int _logicalWidth;
@@ -57,40 +59,17 @@ internal sealed class WdaControlService : IAsyncDisposable
     {
         if (State is not (WdaControlState.Off or WdaControlState.Failed)) return;
         LastError = null;
-        SetState(WdaControlState.Waiting, notifyError: false);
-        _lifecycle = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
-        var cancellationToken = _lifecycle.Token;
+        _udid = udid;
         _gestures = Channel.CreateBounded<WdaGesture>(new BoundedChannelOptions(2)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
         });
-        try
-        {
-            _udid = udid;
-            _forwarder = new WdaPortForwarder(udid, WdaPortForwarder.WebDriverAgentPort);
-            await _forwarder.StartAsync(cancellationToken).ConfigureAwait(false);
-            _httpClient = new HttpClient(new SocketsHttpHandler
-            {
-                UseProxy = false,
-                AllowAutoRedirect = false,
-                ConnectTimeout = TimeSpan.FromSeconds(3),
-            })
-            {
-                BaseAddress = new Uri($"http://127.0.0.1:{_forwarder.LocalPort}/"),
-                Timeout = TimeSpan.FromSeconds(8),
-            };
-            _gestureLoop = Task.Run(() => GestureLoopAsync(cancellationToken), cancellationToken);
-            _pollLoop = Task.Run(() => PollLoopAsync(cancellationToken), cancellationToken);
-            _launchPipeline = Task.Run(() => LaunchPipelineAsync(cancellationToken),
-                cancellationToken);
-        }
-        catch (Exception error)
-        {
-            await StopInternalAsync().ConfigureAwait(false);
-            LastError = DescribeError(error);
-            SetState(WdaControlState.Failed, notifyError: true);
-        }
+        SetState(WdaControlState.Waiting, notifyError: false);
+        _lifecycle = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
+        var cancellationToken = _lifecycle.Token;
+        _gestureLoop = Task.Run(() => GestureLoopAsync(cancellationToken), cancellationToken);
+        _serviceLoop = Task.Run(() => ServiceLoopAsync(cancellationToken), cancellationToken);
     }
 
     internal async Task StopAsync()
@@ -200,35 +179,95 @@ internal sealed class WdaControlService : IAsyncDisposable
         return true;
     }
 
-    private async Task PollLoopAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// One self-healing loop for the whole control session. While waiting it
+    /// creates the usbmux forwarder (retrying while the phone re-enumerates
+    /// for QuickTime, when the device temporarily leaves the usbmux list),
+    /// probes WDA, and launches it through go-ios with a cooldown. While
+    /// connected it only health-probes and falls back to waiting on failure.
+    /// </summary>
+    private async Task ServiceLoopAsync(CancellationToken cancellationToken)
     {
+        long nextLaunchAt = 0;
+        var failedProbes = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
-            var delay = State == WdaControlState.Connected
-                ? StatusPollConnectedMs
-                : StatusPollWaitingMs;
             try
             {
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                if (!await ProbeStatusAsync(cancellationToken).ConfigureAwait(false))
+                if (State == WdaControlState.Connected)
                 {
-                    if (State == WdaControlState.Connected) MarkDisconnected();
+                    if (await ProbeStatusAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        failedProbes = 0;
+                        await Task.Delay(HealthProbeConnectedMs, cancellationToken)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
+                    MarkDisconnected();
+                }
+
+                if (_forwarder is null)
+                {
+                    _forwarder = new WdaPortForwarder(_udid ?? string.Empty,
+                        WdaPortForwarder.WebDriverAgentPort);
+                    await _forwarder.StartAsync(cancellationToken).ConfigureAwait(false);
+                    RecreateHttpClient();
+                    failedProbes = 0;
+                    ReportDiagnostic($"forward_started port={_forwarder.LocalPort}");
+                }
+
+                if (await ProbeStatusAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (State == WdaControlState.Waiting)
+                    {
+                        await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            await CreateSessionAsync(cancellationToken).ConfigureAwait(false);
+                            LastError = null;
+                            SetState(WdaControlState.Connected, notifyError: false);
+                        }
+                        finally
+                        {
+                            _sessionGate.Release();
+                        }
+                    }
+                    await Task.Delay(HealthProbeConnectedMs, cancellationToken)
+                        .ConfigureAwait(false);
                     continue;
                 }
-                if (State == WdaControlState.Waiting)
+
+                if (_launcher.IsAvailable &&
+                    Stopwatch.GetTimestamp() >= nextLaunchAt)
                 {
-                    await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        await CreateSessionAsync(cancellationToken).ConfigureAwait(false);
-                        LastError = null;
-                        SetState(WdaControlState.Connected, notifyError: false);
-                    }
-                    finally
-                    {
-                        _sessionGate.Release();
-                    }
+                    var launched = await _launcher.LaunchAsync(_udid ?? string.Empty,
+                        cancellationToken).ConfigureAwait(false);
+                    ReportDiagnostic(launched
+                        ? "wda_launch_requested"
+                        : $"wda_launch_failed error={LastError}");
+                    nextLaunchAt = Stopwatch.GetTimestamp() +
+                        LaunchCooldownMs * Stopwatch.Frequency / 1000;
                 }
+                else if (!_launcher.IsAvailable && string.IsNullOrEmpty(LastError))
+                {
+                    LastError = "goios_missing";
+                    ReportDiagnostic($"wda_launch_failed error={LastError}");
+                }
+
+                // The usbmux device id changes on every replug and the device
+                // briefly disappears while QuickTime re-enumerates, so a
+                // forwarder that keeps failing is rebuilt from scratch.
+                failedProbes++;
+                if (failedProbes >= ForwarderRecycleAfterFailures &&
+                    _forwarder is not null)
+                {
+                    ReportDiagnostic("forward_recycled");
+                    await _forwarder.DisposeAsync().ConfigureAwait(false);
+                    _forwarder = null;
+                    _sessionId = null;
+                    failedProbes = 0;
+                }
+                await Task.Delay(WaitingLoopMs, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -238,8 +277,32 @@ internal sealed class WdaControlService : IAsyncDisposable
             {
                 if (State == WdaControlState.Connected) MarkDisconnected();
                 LastError = DescribeError(error);
+                ReportDiagnostic($"loop_error error={LastError}");
+                try
+                {
+                    await Task.Delay(WaitingLoopMs, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
+    }
+
+    private void RecreateHttpClient()
+    {
+        _httpClient?.Dispose();
+        _httpClient = new HttpClient(new SocketsHttpHandler
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(3),
+        })
+        {
+            BaseAddress = new Uri($"http://127.0.0.1:{_forwarder!.LocalPort}/"),
+            Timeout = TimeSpan.FromSeconds(8),
+        };
     }
 
     private async Task<bool> ProbeStatusAsync(CancellationToken cancellationToken)
@@ -247,49 +310,6 @@ internal sealed class WdaControlService : IAsyncDisposable
         var response = await SendAsync(HttpMethod.Get, "status", null,
             TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
         return response is not null;
-    }
-
-    /// <summary>
-    /// A manually tapped runner aborts in dyld because iOS only mounts the
-    /// XCTest runtime while a developer session is active, so WDA must be
-    /// launched through go-ios (CoreDevice tunnel + testmanagerd). The
-    /// pipeline probes first and launches with a cooldown whenever WDA is
-    /// still unreachable, which also self-heals after a cable replug.
-    /// </summary>
-    private async Task LaunchPipelineAsync(CancellationToken cancellationToken)
-    {
-        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-        while (!cancellationToken.IsCancellationRequested &&
-               State == WdaControlState.Waiting)
-        {
-            if (await ProbeStatusAsync(cancellationToken).ConfigureAwait(false)) return;
-            try
-            {
-                if (_launcher.IsAvailable)
-                {
-                    var launched = await _launcher.LaunchAsync(_udid ?? string.Empty,
-                        cancellationToken).ConfigureAwait(false);
-                    ReportDiagnostic(launched
-                        ? "wda_launch_requested"
-                        : $"wda_launch_failed error={LastError}");
-                }
-                else
-                {
-                    if (string.IsNullOrEmpty(LastError)) LastError = "goios_missing";
-                    ReportDiagnostic($"wda_launch_failed error={LastError}");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                LastError = $"goios_error:{error.Message}";
-            }
-            await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken)
-                .ConfigureAwait(false);
-        }
     }
 
     private void MarkDisconnected()
@@ -529,17 +549,17 @@ internal sealed class WdaControlService : IAsyncDisposable
     {
         _lifecycle?.Cancel();
         _gestures.Writer.TryComplete();
-        if (_pollLoop is not null)
+        if (_serviceLoop is not null)
         {
             try
             {
-                await _pollLoop.ConfigureAwait(false);
+                await _serviceLoop.ConfigureAwait(false);
             }
             catch
             {
-                // Poll loop cancellation is expected during teardown.
+                // Service loop cancellation is expected during teardown.
             }
-            _pollLoop = null;
+            _serviceLoop = null;
         }
         if (_gestureLoop is not null)
         {
@@ -552,18 +572,6 @@ internal sealed class WdaControlService : IAsyncDisposable
                 // Gesture loop cancellation is expected during teardown.
             }
             _gestureLoop = null;
-        }
-        if (_launchPipeline is not null)
-        {
-            try
-            {
-                await _launchPipeline.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Launch pipeline cancellation is expected during teardown.
-            }
-            _launchPipeline = null;
         }
         if (_forwarder is not null)
         {
