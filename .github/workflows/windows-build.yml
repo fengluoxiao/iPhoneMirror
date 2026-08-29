@@ -40,6 +40,24 @@ jobs:
         shell: pwsh
         run: ./build.ps1 -Configuration Release
 
+      - name: Bundle go-ios for WDA auto-launch
+        shell: pwsh
+        run: |
+          $destination = "outputs/iPhoneMirror/tools/go-ios"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Invoke-WebRequest `
+            "https://github.com/danielpaulus/go-ios/releases/download/v1.3.2/go-ios-win.zip" `
+            -OutFile go-ios.zip
+          Expand-Archive go-ios.zip -DestinationPath go-ios-tmp
+          $exe = Get-ChildItem go-ios-tmp -Recurse -Filter ios.exe |
+            Select-Object -First 1
+          if (-not $exe) { throw "ios.exe not found in go-ios release" }
+          Copy-Item $exe.FullName "$destination/ios.exe"
+          Invoke-WebRequest `
+            "https://raw.githubusercontent.com/danielpaulus/go-ios/v1.3.2/LICENSE" `
+            -OutFile "$destination/LICENSE"
+          Get-ChildItem $destination | Select-Object Name, Length
+
       - name: Upload portable build for manual verification
         uses: actions/upload-artifact@v4
         with:

@@ -50,6 +50,23 @@ from the Apple Devices Microsoft Store product through Windows Package Manager,
 or from Apple's official HTTPS iTunes installer as a compatibility fallback.
 Apple software is not redistributed in this repository or its release assets.
 
+## go-ios v1.3.2
+
+The Windows release bundles the upstream `ios.exe` CLI under
+`tools/go-ios/` in the application directory. It is used to start the iOS 17+
+CoreDevice tunnel and launch a preinstalled WebDriverAgent through
+testmanagerd, which the experimental wired-control feature requires (the
+runner app links XCTest, which iOS only mounts while a developer session is
+active). iPhoneMirror invokes the binary as an external process; no upstream
+source is modified.
+
+- Project: https://github.com/danielpaulus/go-ios
+- Pinned release: https://github.com/danielpaulus/go-ios/releases/tag/v1.3.2
+- Copyright (c) Daniel Paulus
+- License: MIT
+- Included license: `tools/go-ios/LICENSE` (downloaded next to the binary in
+  CI builds)
+
 ## Microsoft Visual C++ runtime
 
 The Windows release includes app-local x64 copies of `msvcp140.dll`,

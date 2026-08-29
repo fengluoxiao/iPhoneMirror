@@ -150,7 +150,10 @@ WebDriverAgent（WDA）应用，把 Windows 的鼠标与键盘输入直接注入
    - 只有 Windows：使用 Sideloadly、AltStore 等工具，用 Apple ID 为上一步的
      WebDriverAgent.ipa 签名并安装。免费 Apple ID 的签名 7 天过期，过期后需要
      连接电脑重新签名；付费开发者账号（每年 $99）签名有效期为一年。
-3. 在手机上点开 WebDriverAgent 应用并保持前台（白屏即正常）。
+3. 无需手动打开任何应用。WDA 的二进制链接了系统的 XCTest 运行时，iOS 只在
+   开发者会话期间挂载它，手动点图标会直接闪退（dyld "Library not loaded"）。
+   iPhoneMirror 内置的 go-ios 会自动建立开发者通道并通过 testmanagerd 拉起
+   WDA，首次拉起时手机可能弹出“信任此电脑”，请点信任。
 4. 保持手机与电脑用数据线连接并已信任；投屏可以继续使用同一条线。
 
 ### 日常使用

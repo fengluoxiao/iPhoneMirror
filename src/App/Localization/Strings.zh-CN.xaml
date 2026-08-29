@@ -144,7 +144,7 @@
     <system:String x:Key="WdaControlWaitingDetail">有线控制通过手机上的 WebDriverAgent 应用注入触摸和键盘输入，与有线投屏共用同一条数据线。</system:String>
     <system:String x:Key="WdaControlStepOne">手机：设置 → 隐私与安全性 → 开发者模式，打开并重启（已开启可跳过）。</system:String>
     <system:String x:Key="WdaControlStepTwo">手机：按使用教程一次性安装并签名 WebDriverAgent 应用（免费 Apple ID 每 7 天需重新签名）。</system:String>
-    <system:String x:Key="WdaControlStepThree">手机：点开 WebDriverAgent 应用并保持前台（白屏属于正常现象）。</system:String>
+    <system:String x:Key="WdaControlStepThree">无需手动打开任何应用：iPhoneMirror 会自动通过系统开发者通道拉起 WebDriverAgent（首次拉起时手机可能弹出“信任此电脑”提示，请点信任）。</system:String>
     <system:String x:Key="WdaControlStepFour">保持 USB 数据线连接；有线投屏可以继续使用同一条线。</system:String>
     <system:String x:Key="WdaControlStepFive">等待本窗口自动变为已连接；首次连接手机可能弹出配件信任提示。</system:String>
     <system:String x:Key="WdaControlWaitingStatus">等待 WebDriverAgent</system:String>

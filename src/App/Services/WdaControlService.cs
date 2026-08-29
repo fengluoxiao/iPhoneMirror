@@ -23,6 +23,7 @@ internal sealed class WdaControlService : IAsyncDisposable
 
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private readonly SemaphoreSlim _directCallGate = new(1, 1);
+    private readonly GoIosLauncher _launcher = new();
     private Channel<WdaGesture> _gestures =
         Channel.CreateBounded<WdaGesture>(new BoundedChannelOptions(2)
         {
@@ -34,7 +35,9 @@ internal sealed class WdaControlService : IAsyncDisposable
     private WdaPortForwarder? _forwarder;
     private Task? _pollLoop;
     private Task? _gestureLoop;
+    private Task? _launchPipeline;
     private string? _sessionId;
+    private string? _udid;
     private int _logicalWidth;
     private int _logicalHeight;
 
@@ -61,6 +64,7 @@ internal sealed class WdaControlService : IAsyncDisposable
         });
         try
         {
+            _udid = udid;
             var device = await UsbmuxTunnelClient.FindDeviceAsync(udid, cancellationToken)
                 .ConfigureAwait(false);
             _forwarder = new WdaPortForwarder(device, UsbmuxTunnelClient.WebDriverAgentPort);
@@ -77,6 +81,8 @@ internal sealed class WdaControlService : IAsyncDisposable
             };
             _gestureLoop = Task.Run(() => GestureLoopAsync(cancellationToken), cancellationToken);
             _pollLoop = Task.Run(() => PollLoopAsync(cancellationToken), cancellationToken);
+            _launchPipeline = Task.Run(() => LaunchPipelineAsync(cancellationToken),
+                cancellationToken);
         }
         catch (Exception error)
         {
@@ -240,6 +246,41 @@ internal sealed class WdaControlService : IAsyncDisposable
         var response = await SendAsync(HttpMethod.Get, "status", null,
             TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
         return response is not null;
+    }
+
+    /// <summary>
+    /// A manually tapped runner aborts in dyld because iOS only mounts the
+    /// XCTest runtime while a developer session is active, so WDA must be
+    /// launched through go-ios (CoreDevice tunnel + testmanagerd). The
+    /// pipeline probes first and launches with a cooldown whenever WDA is
+    /// still unreachable, which also self-heals after a cable replug.
+    /// </summary>
+    private async Task LaunchPipelineAsync(CancellationToken cancellationToken)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        while (!cancellationToken.IsCancellationRequested &&
+               State == WdaControlState.Waiting)
+        {
+            if (await ProbeStatusAsync(cancellationToken).ConfigureAwait(false)) return;
+            try
+            {
+                if (_launcher.IsAvailable)
+                    await _launcher.LaunchAsync(_udid ?? string.Empty, cancellationToken)
+                        .ConfigureAwait(false);
+                else if (string.IsNullOrEmpty(LastError))
+                    LastError = "goios_missing";
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                LastError = $"goios_error:{error.Message}";
+            }
+            await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     private void MarkDisconnected()
@@ -504,11 +545,24 @@ internal sealed class WdaControlService : IAsyncDisposable
             }
             _gestureLoop = null;
         }
+        if (_launchPipeline is not null)
+        {
+            try
+            {
+                await _launchPipeline.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Launch pipeline cancellation is expected during teardown.
+            }
+            _launchPipeline = null;
+        }
         if (_forwarder is not null)
         {
             await _forwarder.DisposeAsync().ConfigureAwait(false);
             _forwarder = null;
         }
+        _launcher.Stop();
         _httpClient?.Dispose();
         _httpClient = null;
         _sessionId = null;

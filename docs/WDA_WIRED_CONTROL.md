@@ -93,12 +93,20 @@ PreviewPointerEventArgs ──► WdaControlService ──► 本地 TcpListener
 
 1. 构建:`dotnet build src/App/iPhoneMirror.App.csproj -c Release`(应零错误)。
 2. 准备:iPhone 数据线连接并信任;投屏中;手机已装 WDA(见 USER_GUIDE 新章节)
-   且开启开发者模式;在手机上点开 WebDriverAgent 应用(白屏即正常)。
+   且开启开发者模式;无需手动打开 WDA——软件会通过 go-ios 自动拉起。
 3. 点击快捷操作栏"启用有线控制" → 弹窗显示等待 → 数秒内变"已连接"并自动关闭。
 4. 鼠标左键点预览 → 手机对应位置出现点击;拖动 → 滑动/滚动;右键 → 长按菜单;
    滚轮 → 列表滚动;主屏/锁屏/音量按钮生效;点手机搜索框后用键盘输入英文。
 5. 断开 USB:状态自动退回等待/失败,重新插上并重开 WDA 后可恢复。
 6. 回归:蓝牙控制功能不受影响(两者互斥启用)。
+
+## 3.1 已知问题与修复记录
+
+- 2026-08-29 真机首验(iOS 27 beta 24A5424a):手动点开 WDA 图标闪退,崩溃日志
+  为 dyld "Library not loaded: @rpath/XCTest.framework/XCTest"。结论:runner
+  必须通过开发者会话(testmanagerd)拉起,手动点图标的引导作废。已集成
+  go-ios v1.3.2(MIT,`tunnel start --userspace` + `runwda`)实现自动拉起,
+  并修正三语引导文案。
 
 ## 4. 风险与备注
 

@@ -144,7 +144,7 @@
     <system:String x:Key="WdaControlWaitingDetail">Wired control injects touch and keyboard input through the WebDriverAgent app and shares the same USB cable as wired mirroring.</system:String>
     <system:String x:Key="WdaControlStepOne">iPhone: Open Settings → Privacy &amp; Security → Developer Mode, turn it on, and restart (skip if already enabled).</system:String>
     <system:String x:Key="WdaControlStepTwo">iPhone: Install and sign the WebDriverAgent app once (see the user guide; a free Apple ID requires re-signing every 7 days).</system:String>
-    <system:String x:Key="WdaControlStepThree">iPhone: Open the WebDriverAgent app and keep it in the foreground (a blank screen is normal).</system:String>
+    <system:String x:Key="WdaControlStepThree">No app needs to be opened manually: iPhoneMirror starts WebDriverAgent automatically through the system developer channel. The first launch may ask you to trust this computer on the device.</system:String>
     <system:String x:Key="WdaControlStepFour">Keep the device connected over USB; wired mirroring can keep using the same cable.</system:String>
     <system:String x:Key="WdaControlStepFive">Wait for this window to switch to connected. The first connection may ask you to trust the accessory on the device.</system:String>
     <system:String x:Key="WdaControlWaitingStatus">Waiting for WebDriverAgent</system:String>
