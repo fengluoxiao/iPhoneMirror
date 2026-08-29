@@ -20,6 +20,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
     private Process? _tunnelAgent;
     private Process? _wdaProcess;
     private string? _wdaLogPath;
+    private string? _agentLogPath;
 
     internal static string ResolveExePath() => Path.Combine(
         AppContext.BaseDirectory, "tools", "go-ios", "ios.exe");
@@ -150,9 +151,9 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 {
                     var exitTail = agentOutput().Trim();
                     var exitCode = SafeExitCode(_tunnelAgent);
-                    var agentFile = DumpAgentOutput(exitTail);
-                    var lastMsg = ExtractLastLogMessage(exitTail);
-                    var error = $"{mode}:agent_exited:{exitCode} last_msg={lastMsg ?? "none"} agent_log={agentFile}";
+                    var exitFile = DumpAgentOutput(exitTail);
+                    var exitMsg = ExtractLastLogMessage(exitTail);
+                    var error = $"{mode}:agent_exited:{exitCode} last_msg={exitMsg ?? "none"} agent_log={exitFile}";
                     TryKill(_tunnelAgent);
                     _tunnelAgent = null;
                     return (false, error);
