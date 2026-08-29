@@ -139,7 +139,8 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         {
             // taskkill failing (nothing to kill) is not an error.
         }
-        _tunnelAgent = StartDetachedWithCapture(arguments, out var agentOutput);
+        _tunnelAgent = StartDetachedWithCapture(arguments, out var agentOutput,
+            "ENABLE_GO_IOS_AGENT", userspaceTun ? "user" : "kernel");
         if (_tunnelAgent is null) return (false, $"{mode}:agent_start_failed");
         try
         {
@@ -151,7 +152,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 {
                     var exitTail = agentOutput().Trim();
                     var exitCode = SafeExitCode(_tunnelAgent);
-                    var exitFile = DumpAgentOutput(exitTail);
+                    var exitFile = DumpAgentOutput(exitTail, mode);
                     var exitMsg = ExtractLastLogMessage(exitTail);
                     var error = $"{mode}:agent_exited:{exitCode} last_msg={exitMsg ?? "none"} agent_log={exitFile}";
                     TryKill(_tunnelAgent);
@@ -165,7 +166,7 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             var (_, pendingListing) = await TunnelListingAsync(udid, cancellationToken)
                 .ConfigureAwait(false);
             var agentTail = agentOutput().Trim();
-            var agentFile = DumpAgentOutput(agentTail);
+            var agentFile = DumpAgentOutput(agentTail, mode);
             var lastMsg = ExtractLastLogMessage(agentTail);
             return (false,
                 $"{mode}:timeout last_msg={lastMsg ?? "none"} agent_log={agentFile} ls={pendingListing}");
@@ -180,7 +181,9 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         }
     }
 
-    private Process? StartDetachedWithCapture(string[] arguments, out Func<string> outputTail)
+    private Process? StartDetachedWithCapture(string[] arguments,
+        out Func<string> outputTail, string? environmentKey = null,
+        string? environmentValue = null)
     {
         outputTail = () => string.Empty;
         var exe = ResolveExePath();
@@ -193,6 +196,8 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        if (environmentKey is not null)
+            startInfo.EnvironmentVariables[environmentKey] = environmentValue;
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         var process = Process.Start(startInfo);
         if (process is null) return null;
@@ -338,6 +343,8 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        // Daemon mode (agent + tunnel-info API) is gated behind this env var.
+        startInfo.EnvironmentVariables["ENABLE_GO_IOS_AGENT"] = "user";
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = startInfo };
         var output = new StringBuilder();
@@ -357,10 +364,10 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         return (process.ExitCode, output.ToString());
     }
 
-    private string DumpAgentOutput(string output)
+    private string DumpAgentOutput(string output, string mode)
     {
         _agentLogPath = Path.Combine(Path.GetTempPath(),
-            "iPhoneMirror-goios-agent.log");
+            $"iPhoneMirror-goios-agent-{mode}.log");
         try { File.WriteAllText(_agentLogPath, output); }
         catch { return "unavailable"; }
         return _agentLogPath;
