@@ -124,6 +124,20 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             : new[] { "tunnel", "start", TunnelInfoPortArg, $"--udid={udid}" };
 
         TryKill(_tunnelAgent);
+        // Known go-ios issue: the userspace tunnel listener binds a fixed
+        // port, so a stale agent from a crashed session makes every new
+        // agent exit immediately. Clear all go-ios processes first; the
+        // launch path never reaches here while a WDA process is alive.
+        try
+        {
+            await RunProcessCaptureAsync("taskkill",
+                ["/F", "/IM", "ios.exe", "/T"], TimeSpan.FromSeconds(5),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // taskkill failing (nothing to kill) is not an error.
+        }
         _tunnelAgent = StartDetachedWithCapture(arguments, out var agentOutput);
         if (_tunnelAgent is null) return (false, $"{mode}:agent_start_failed");
         try
@@ -302,7 +316,14 @@ internal sealed class GoIosLauncher : IAsyncDisposable
     private async Task<(int ExitCode, string Output)> RunCaptureAsync(
         string[] arguments, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var exe = ResolveExePath();
+        return await RunProcessCaptureAsync(ResolveExePath(), arguments, timeout,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<(int ExitCode, string Output)> RunProcessCaptureAsync(
+        string exe, string[] arguments, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = exe,
