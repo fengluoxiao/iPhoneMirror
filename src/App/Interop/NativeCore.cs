@@ -280,6 +280,14 @@ internal sealed class NativeCore : IDisposable
     private static extern int im_log_message(
         [MarshalAs(UnmanagedType.LPWStr)] string message);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    private static extern int im_mux_forward_start(
+        [MarshalAs(UnmanagedType.LPWStr)] string udid, ushort devicePort,
+        out ushort localPort);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void im_mux_forward_stop(ushort localPort);
+
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern int im_refresh_devices([Out] NativeDeviceInfo[]? devices, ref uint count);
 
@@ -430,6 +438,16 @@ internal sealed class NativeCore : IDisposable
     private static long _selectedPreviewSession;
     private static nint _selectedPreviewWindow;
     private static readonly object PreviewSelectionGate = new();
+
+    internal static int MuxForwardStart(string udid, ushort devicePort, out ushort localPort)
+    {
+        return im_mux_forward_start(udid, devicePort, out localPort);
+    }
+
+    internal static void MuxForwardStop(ushort localPort)
+    {
+        im_mux_forward_stop(localPort);
+    }
 
     internal static void SelectPreviewSession(ulong handle)
     {

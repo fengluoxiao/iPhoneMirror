@@ -1,30 +1,26 @@
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
+using IPhoneMirror.App.Interop;
 
 namespace IPhoneMirror.App.Services;
 
 /// <summary>
-/// Bridges local loopback TCP connections to a device port through usbmuxd,
-/// the same role iproxy plays: every accepted client gets its own
-/// usbmux Connect tunnel, so HttpClient connection pooling simply maps to
-/// parallel device tunnels.
+/// Bridges a loopback TCP listener to device port 8100 through the native
+/// usbmux forwarder (iproxy semantics: one usbmux tunnel per accepted
+/// connection, so HttpClient connection pooling maps to parallel tunnels).
+/// The tunnel lives in iPhoneMirror.Core, which uses the same proven
+/// usbmux client as the QuickTime capture pipeline.
 /// </summary>
 internal sealed class WdaPortForwarder : IAsyncDisposable
 {
-    private const int MaxConcurrentBridges = 8;
-    private readonly UsbmuxTunnelClient.MuxDeviceLocation _device;
-    private readonly ushort _devicePort;
-    private readonly CancellationTokenSource _cancellation = new();
-    private readonly object _bridgeSync = new();
-    private readonly List<Task> _bridges = [];
-    private TcpListener? _listener;
-    private Task? _acceptLoop;
+    internal const ushort WebDriverAgentPort = 8100;
 
-    internal WdaPortForwarder(
-        UsbmuxTunnelClient.MuxDeviceLocation device, ushort devicePort)
+    private readonly string _udid;
+    private readonly ushort _devicePort;
+    private ushort _localPort;
+    private bool _started;
+
+    internal WdaPortForwarder(string udid, ushort devicePort)
     {
-        _device = device;
+        _udid = udid;
         _devicePort = devicePort;
     }
 
@@ -32,128 +28,38 @@ internal sealed class WdaPortForwarder : IAsyncDisposable
 
     internal Task StartAsync(CancellationToken cancellationToken)
     {
-        _listener = new TcpListener(IPAddress.Loopback, 0);
-        _listener.Start();
-        LocalPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _acceptLoop = AcceptLoopAsync(_cancellation.Token);
+        var result = NativeCore.MuxForwardStart(_udid, _devicePort, out var localPort);
+        if (result != 0) throw new MuxForwardException(result);
+        _localPort = localPort;
+        LocalPort = localPort;
+        _started = true;
         return Task.CompletedTask;
     }
 
-    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
+    public ValueTask DisposeAsync()
     {
-        while (!cancellationToken.IsCancellationRequested)
+        if (_started)
         {
-            TcpClient client;
-            try
-            {
-                client = await _listener!.AcceptTcpClientAsync(cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception error) when (error is OperationCanceledException
-                or SocketException or ObjectDisposedException or IOException)
-            {
-                break;
-            }
-            lock (_bridgeSync)
-            {
-                _bridges.RemoveAll(static task => task.IsCompleted);
-                if (_bridges.Count >= MaxConcurrentBridges)
-                {
-                    client.Dispose();
-                    continue;
-                }
-                _bridges.Add(Task.Run(() => BridgeAsync(client),
-                    CancellationToken.None));
-            }
+            NativeCore.MuxForwardStop(_localPort);
+            _started = false;
         }
+        return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>Carries the Core result code as a stable string identifier.</summary>
+internal sealed class MuxForwardException : Exception
+{
+    internal MuxForwardException(int result) : base(result switch
+    {
+        -1 => "invalid_argument",
+        -4 => "mux_unavailable",
+        -6 => "device_not_found",
+        _ => $"mux_forward_failed:{result}",
+    })
+    {
+        Result = result;
     }
 
-    private async Task BridgeAsync(TcpClient accepted)
-    {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            _cancellation.Token);
-        try
-        {
-            using var tunnel = await UsbmuxTunnelClient.ConnectDevicePortAsync(
-                _device, _devicePort, linked.Token).ConfigureAwait(false);
-            using var _ = accepted;
-            var clientStream = accepted.GetStream();
-            var upstream = CopyAsync(clientStream, tunnel.Stream, linked.Token);
-            var downstream = CopyAsync(tunnel.Stream, clientStream, linked.Token);
-            await Task.WhenAny(upstream, downstream).ConfigureAwait(false);
-            linked.Cancel();
-        }
-        catch
-        {
-            // Tunnel setup or I/O failure simply ends this bridge; the HTTP
-            // client retries with a fresh connection on its next request.
-        }
-        finally
-        {
-            linked.Dispose();
-        }
-    }
-
-    private static async Task CopyAsync(
-        Stream source, Stream destination, CancellationToken cancellationToken)
-    {
-        var buffer = new byte[16 * 1024];
-        try
-        {
-            int read;
-            while ((read = await source.ReadAsync(buffer, cancellationToken)
-                .ConfigureAwait(false)) > 0)
-            {
-                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken)
-                    .ConfigureAwait(false);
-                await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            // Either side closing ends the bridge; the other direction observes it.
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        _cancellation.Cancel();
-        try
-        {
-            _listener?.Stop();
-        }
-        catch
-        {
-            // Listener already stopped or never started.
-        }
-        if (_acceptLoop is not null)
-        {
-            try
-            {
-                await _acceptLoop.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Accept loop failures are expected during teardown.
-            }
-        }
-        Task[] pending;
-        lock (_bridgeSync)
-        {
-            pending = [.. _bridges];
-            _bridges.Clear();
-        }
-        foreach (var bridge in pending)
-        {
-            try
-            {
-                await bridge.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Bridges are best-effort during teardown.
-            }
-        }
-        _cancellation.Dispose();
-    }
+    internal int Result { get; }
 }

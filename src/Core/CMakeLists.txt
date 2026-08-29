@@ -6,6 +6,7 @@ set(IPHONEMIRROR_CORE_SOURCES
     src/Protocol/QuickTimePacket.cpp
     src/Protocol/QuickTimeSession.cpp
     src/Transport/Socket.cpp
+    src/Transport/MuxForward.cpp
     src/Transport/UsbMuxClient.cpp
     src/Transport/QtUsbTransport.cpp
     src/Transport/LibUsb0Transport.cpp

@@ -8,6 +8,7 @@
 #include "Logging.h"
 #include "Renderer/D3D11PreviewRenderer.h"
 #include "Transport/LibUsb0Readiness.h"
+#include "Transport/MuxForward.h"
 #include "Transport/Socket.h"
 
 #include <algorithm>
@@ -2073,6 +2074,28 @@ std::int32_t IM_CALL im_session_set_window_rotation(iPhoneMirror::SessionHandle 
     // an otherwise healthy mirroring session during a game orientation change.
     found->second->set_rotation(normalized == 2 ? 2 : 0);
     return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
+}
+
+std::int32_t IM_CALL im_mux_forward_start(const wchar_t* udid,
+    std::uint16_t device_port, std::uint16_t* local_port) {
+    using namespace iPhoneMirror;
+    const auto result = static_cast<Result>(transport::MuxForward::start(
+        udid == nullptr ? std::wstring{} : std::wstring(udid), device_port,
+        local_port));
+    if (result != Result::Ok) {
+        std::wstring message = L"usbmux forward could not be established";
+        if (result == Result::DeviceNotFound) {
+            message = L"no usbmux device matched the requested UDID";
+        } else if (result == Result::TransportUnavailable) {
+            message = L"usbmux forward listener unavailable";
+        }
+        return fail(result, message.c_str());
+    }
+    return static_cast<std::int32_t>(Result::Ok);
+}
+
+void IM_CALL im_mux_forward_stop(std::uint16_t local_port) {
+    transport::MuxForward::stop(local_port);
 }
 
 const wchar_t* IM_CALL im_last_error() { return last_error.c_str(); }

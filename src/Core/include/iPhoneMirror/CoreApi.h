@@ -450,4 +450,14 @@ IM_API std::int32_t IM_CALL im_session_set_window_rotation(
     iPhoneMirror::SessionHandle handle, void* hwnd, std::int32_t quarter_turns);
 
 
+// Bridges a loopback TCP listener to a TCP port on the usbmux device with
+// the given UDID (iproxy semantics, one tunnel per accepted connection).
+// Used by the wired-control feature to reach WebDriverAgent on the device
+// while the QuickTime capture keeps its own usbmux sessions. Returns Ok and
+// the bound local port, DeviceNotFound, or a transport failure code.
+IM_API std::int32_t IM_CALL im_mux_forward_start(const wchar_t* udid,
+    std::uint16_t device_port, std::uint16_t* local_port);
+// Closes the listener for a forward created by im_mux_forward_start.
+IM_API void IM_CALL im_mux_forward_stop(std::uint16_t local_port);
+
 IM_API const wchar_t* IM_CALL im_last_error();

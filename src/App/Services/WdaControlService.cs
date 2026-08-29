@@ -50,6 +50,9 @@ internal sealed class WdaControlService : IAsyncDisposable
 
     internal event Action<WdaControlState, string?>? StateChanged;
 
+    /// <summary>Receives launch-pipeline progress for the diagnostic log.</summary>
+    internal Action<string>? DiagnosticSink;
+
     internal async Task StartAsync(string udid, CancellationToken shutdown)
     {
         if (State is not (WdaControlState.Off or WdaControlState.Failed)) return;
@@ -65,9 +68,7 @@ internal sealed class WdaControlService : IAsyncDisposable
         try
         {
             _udid = udid;
-            var device = await UsbmuxTunnelClient.FindDeviceAsync(udid, cancellationToken)
-                .ConfigureAwait(false);
-            _forwarder = new WdaPortForwarder(device, UsbmuxTunnelClient.WebDriverAgentPort);
+            _forwarder = new WdaPortForwarder(udid, WdaPortForwarder.WebDriverAgentPort);
             await _forwarder.StartAsync(cancellationToken).ConfigureAwait(false);
             _httpClient = new HttpClient(new SocketsHttpHandler
             {
@@ -265,10 +266,18 @@ internal sealed class WdaControlService : IAsyncDisposable
             try
             {
                 if (_launcher.IsAvailable)
-                    await _launcher.LaunchAsync(_udid ?? string.Empty, cancellationToken)
-                        .ConfigureAwait(false);
-                else if (string.IsNullOrEmpty(LastError))
-                    LastError = "goios_missing";
+                {
+                    var launched = await _launcher.LaunchAsync(_udid ?? string.Empty,
+                        cancellationToken).ConfigureAwait(false);
+                    ReportDiagnostic(launched
+                        ? "wda_launch_requested"
+                        : $"wda_launch_failed error={LastError}");
+                }
+                else
+                {
+                    if (string.IsNullOrEmpty(LastError)) LastError = "goios_missing";
+                    ReportDiagnostic($"wda_launch_failed error={LastError}");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -504,10 +513,9 @@ internal sealed class WdaControlService : IAsyncDisposable
         }
     }
 
-    private static string DescribeError(Exception error) =>
-        error is UsbmuxTunnelClient.UsbmuxException usbmux
-            ? usbmux.Message
-            : error.Message;
+    private static string DescribeError(Exception error) => error.Message;
+
+    private void ReportDiagnostic(string detail) => DiagnosticSink?.Invoke(detail);
 
     private void SetState(WdaControlState state, bool notifyError)
     {
