@@ -591,6 +591,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(CanStartBluetoothControl));
             OnPropertyChanged(nameof(CanStopBluetoothControl));
             OnPropertyChanged(nameof(CanToggleBluetoothControl));
+            StartWiredControlCommand?.NotifyCanExecuteChanged();
+            StopWiredControlCommand?.NotifyCanExecuteChanged();
+            ToggleWiredControlCommand?.NotifyCanExecuteChanged();
+            OnPropertyChanged(nameof(CanStartWiredControl));
+            OnPropertyChanged(nameof(CanStopWiredControl));
+            OnPropertyChanged(nameof(CanToggleWiredControl));
             ApplyVideoSettingsCommand.NotifyCanExecuteChanged();
             MoreImageSettingsCommand.NotifyCanExecuteChanged();
             ApplyWirelessSettingsCommand.NotifyCanExecuteChanged();
@@ -2066,6 +2072,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanUseVisualPreviewTools));
         NotifyMediaOutputStateChanged();
         MediaOutputSettingsCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanStartWiredControl));
+        OnPropertyChanged(nameof(CanStopWiredControl));
+        OnPropertyChanged(nameof(CanToggleWiredControl));
+        StartWiredControlCommand.NotifyCanExecuteChanged();
+        StopWiredControlCommand.NotifyCanExecuteChanged();
+        ToggleWiredControlCommand.NotifyCanExecuteChanged();
     }
 
     private void NotifyCaptureSessionChanged()
@@ -2091,6 +2103,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         StopBluetoothControlCommand.NotifyCanExecuteChanged();
         ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
         MediaOutputSettingsCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanStartWiredControl));
+        OnPropertyChanged(nameof(CanStopWiredControl));
+        OnPropertyChanged(nameof(CanToggleWiredControl));
+        StartWiredControlCommand.NotifyCanExecuteChanged();
+        StopWiredControlCommand.NotifyCanExecuteChanged();
+        ToggleWiredControlCommand.NotifyCanExecuteChanged();
     }
 
     private static bool IsActiveCaptureState(CaptureState state) => state is
