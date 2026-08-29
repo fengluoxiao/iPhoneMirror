@@ -150,7 +150,9 @@ internal sealed class GoIosLauncher : IAsyncDisposable
                 {
                     var exitTail = agentOutput().Trim();
                     var exitCode = SafeExitCode(_tunnelAgent);
-                    var error = $"{mode}:agent_exited:{exitCode}:{exitTail}";
+                    var agentFile = DumpAgentOutput(exitTail);
+                    var lastMsg = ExtractLastLogMessage(exitTail);
+                    var error = $"{mode}:agent_exited:{exitCode} last_msg={lastMsg ?? "none"} agent_log={agentFile}";
                     TryKill(_tunnelAgent);
                     _tunnelAgent = null;
                     return (false, error);
@@ -161,8 +163,11 @@ internal sealed class GoIosLauncher : IAsyncDisposable
             }
             var (_, pendingListing) = await TunnelListingAsync(udid, cancellationToken)
                 .ConfigureAwait(false);
-            var outputTail = agentOutput().Trim();
-            return (false, $"{mode}:timeout ls={pendingListing} agent=[{outputTail}]");
+            var agentTail = agentOutput().Trim();
+            var agentFile = DumpAgentOutput(agentTail);
+            var lastMsg = ExtractLastLogMessage(agentTail);
+            return (false,
+                $"{mode}:timeout last_msg={lastMsg ?? "none"} agent_log={agentFile} ls={pendingListing}");
         }
         finally
         {
@@ -349,6 +354,25 @@ internal sealed class GoIosLauncher : IAsyncDisposable
         output.Append(await stdout.ConfigureAwait(false));
         output.Append(await stderr.ConfigureAwait(false));
         return (process.ExitCode, output.ToString());
+    }
+
+    private string DumpAgentOutput(string output)
+    {
+        _agentLogPath = Path.Combine(Path.GetTempPath(),
+            "iPhoneMirror-goios-agent.log");
+        try { File.WriteAllText(_agentLogPath, output); }
+        catch { return "unavailable"; }
+        return _agentLogPath;
+    }
+
+    private static string? ExtractLastLogMessage(string output)
+    {
+        var marker = "\"msg\":\"";
+        var index = output.LastIndexOf(marker, StringComparison.Ordinal);
+        if (index < 0) return null;
+        var start = index + marker.Length;
+        var end = output.IndexOf('"', start);
+        return end > start ? output[start..end] : null;
     }
 
     private static void TryKill(Process? process)
