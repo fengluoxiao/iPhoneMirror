@@ -35,9 +35,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path ipa/Payload | Out-Null
           Move-Item build/WebDriverAgentRunner-Runner.app ipa/Payload/
-          # bsdtar (bsdtar -a) writes forward-slash zip entries, which the
-          # iOS installer requires; Compress-Archive historically does not.
-          tar -a -cf WebDriverAgent.ipa -C ipa Payload
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          # CreateFromDirectory writes forward-slash zip entries with Payload
+          # at the archive root, which the iOS installer requires. bsdtar -a
+          # cannot be used here: it does not recognize the .ipa extension and
+          # silently falls back to an uncompressed tar.
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            (Join-Path $PWD 'ipa'), (Join-Path $PWD 'WebDriverAgent.zip'),
+            [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          Move-Item -Force WebDriverAgent.zip WebDriverAgent.ipa
+          $magic = [System.IO.File]::ReadAllBytes('WebDriverAgent.ipa')[0..1]
+          if (($magic[0] -ne 0x50) -or ($magic[1] -ne 0x4B)) {
+            throw "repacked ipa is not a zip archive"
+          }
           Get-Item WebDriverAgent.ipa | Select-Object Name, Length
 
       - name: Upload unsigned ipa for personal signing
